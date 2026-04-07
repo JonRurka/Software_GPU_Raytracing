@@ -1,0 +1,924 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+
+
+
+int Width;
+int Height;
+int SamplesPerPixel;
+int MaxDepth;
+int Seed;
+
+int NumObjects;
+
+float VFOV;
+float3 LookFrom;
+float3 LookAt;
+float3 VUP;
+
+float DefocusAngle; // Variation angle of rays through each pixel
+float FocusDist; // Variation angle of rays through each pixel
+
+typedef float3 point3;
+typedef float3 vec3;
+typedef float3 color;
+typedef int mat_type;
+typedef int mat_ID;
+typedef int hit_type;
+
+#define MATERIAL_TYPE_LAMBERTIAN    ((mat_type)1)
+#define MATERIAL_TYPE_METAL         ((mat_type)2)
+#define MATERIAL_TYPE_DIELECTRIC    ((mat_type)3)
+
+#define HITTABLE_TYPE_SPHERE        ((hit_type)1)
+#define HITTABLE_TYPE_QUAD          ((hit_type)2)
+
+#define POS_INF asfloat(0x7F800000)
+#define NEG_INF asfloat(0xFF800000)
+#define PI (3.1415926535897932385)
+
+uint C_2D_to_1D(int3 id, uint width) {
+    return uint(id.y * width + id.x);
+}
+
+int2 C_1D_to_2D(uint i, uint width) {
+    int y = int(i / width);
+    int x = int(i % width);
+
+    return int2(x, y);
+}
+
+float degrees_to_radians(float degrees) {
+    return (degrees * PI) / 180.0f;
+}
+
+struct rand_state{
+    float3 cur_val;
+    int3 id;
+};
+rand_state rand_state_new(int3 id){
+    rand_state res;
+    res.cur_val = float3(max(1, (id.x + 1 + Seed) % Width), max(1, (id.y + 1 + Seed) % Height), 0);
+    res.id = id;
+    return res;
+}
+
+//RWStructuredBuffer<float> rand_state;
+inline float random_double(inout rand_state state)
+{
+    /*float last = state.cur_val;
+    float seed_v = Seed + (last + 1) * 12451.531;
+    float3 seed_uv = float3(state.id.x + seed_v + 14.6734, state.id.y + seed_v + 123.054, 0) + C_2D_to_1D(state.id, Width);
+    float cur_val = frac(sin(dot(seed_uv.xy, float2(12.9898, 78.233))) * 43758.5453123);
+    state.cur_val = cur_val;
+    return cur_val;*/
+    float cur_val = frac(sin(dot(float2(state.cur_val.xy), float2(12.9898, 78.233))) * 43758.5453123);
+    state.cur_val += float3(max(1, state.id.x + 1 + cur_val), max(1, state.id.y + 1 + cur_val), 0);
+    state.cur_val = float3(fmod(state.cur_val.x, Width), fmod(state.cur_val.y, Height), 0);
+    return cur_val;
+}
+
+inline float random_double(inout rand_state state, float min, float max) {
+    return min + (max - min) * random_double(state);
+}
+
+inline int random_int(inout rand_state state, int min, int max) {
+    // Returns a random integer in [min,max].
+    return int(random_double(state, min, max + 1));
+}
+
+float linear_to_gamma(float linear_comp) {
+    if (linear_comp > 0)
+        return sqrt(linear_comp);
+    return 0;
+}
+
+inline vec3 unit_vector(const vec3 v) {
+    return v / length(v);
+}
+
+float length_squared(float3 e){
+    return e[0]*e[0] + e[1]*e[1] + e[2]*e[2];
+}
+
+float length(float3 e){
+    return sqrt(length_squared(e));
+}
+
+bool vec3_near_zero(float3 e) {
+    // Return true if the vector is close to zero in all dimensions.
+    float s = 1e-8;
+    return (abs(e[0]) < s) && (abs(e[1]) < s) && (abs(e[2]) < s);
+}
+
+vec3 random_vec3(inout rand_state state){
+    return vec3(random_double(state), random_double(state), random_double(state));
+}
+
+vec3 random_vec3(inout rand_state state, float min, float max) {
+    return vec3(random_double(state, min, max), random_double(state, min, max), random_double(state, min, max));
+}
+
+vec3 random_in_unit_disk(inout rand_state state) {
+    int n = 50;
+    while (true) {
+        if (n <= 0)
+            return vec3(POS_INF, POS_INF, POS_INF);
+        vec3 p = vec3(random_double(state, -1, 1), random_double(state, -1, 1), 0);
+        if (length_squared(p) < 1)
+            return p;
+        n-=1;
+    }
+}
+
+vec3 random_unit_vector(inout rand_state state, inout int n, inout vec3 p) {
+    //int n = 50;
+    while (true) {
+        if (n <= 0)
+            return vec3(POS_INF, POS_INF, POS_INF);
+        p = random_vec3(state, -1, 1);
+        float lensq = length_squared(p);
+        if (1e-160 < lensq && lensq <= 1)
+            return p / sqrt(lensq);
+        n-=1;
+    }
+}
+
+vec3 random_unit_vector(inout rand_state state){
+    int n = 50;
+    vec3 p;
+    return random_unit_vector(state, n, p);
+}
+
+vec3 random_on_hemisphere(inout rand_state state, const vec3 normal) {
+    vec3 on_unit_sphere = random_unit_vector(state);
+    if (dot(on_unit_sphere, normal) > 0.0)
+        return on_unit_sphere;
+    else
+        return -on_unit_sphere;
+}
+
+vec3 vec3_reflect(const vec3 v, const vec3 n) {
+    return v - 2*dot(v,n)*n;
+}
+
+vec3 vec3_refract(const vec3 uv, const vec3 n, float etai_over_etat) {
+    float cos_theta = min(dot(-uv, n), 1.0);
+    vec3 r_out_perp = etai_over_etat * (uv + cos_theta*n);
+    vec3 r_out_parallel = -sqrt(abs(1.0 - length_squared(r_out_perp))) * n;
+    return r_out_perp + r_out_parallel;
+}
+
+struct ray{
+    point3 orig;
+    vec3 dir;
+    float tm;
+};
+
+struct interval{
+    float min;
+    float max;
+};
+
+struct aabb{
+    interval x;
+    interval y;
+    interval z;
+};
+
+struct material{
+    mat_type material_type;
+    int does_emit;
+    color albedo;
+    float fuzz;
+    float refraction_index;
+};
+
+struct hit_record{
+    point3 position;
+    vec3 normal;
+    mat_ID mat;
+    float t;
+    float2 uv;
+    bool front_face;
+};
+
+struct hittable{
+    hit_type hittable_type;
+    int enabled;
+    ray center;
+    mat_ID mat;
+    aabb bbox;
+
+    float radius; //sphere
+
+    point3 Q;
+    vec3 u, v;
+    vec3 w;
+    vec3 normal;
+    float D;
+
+    vec3 v0;
+    vec3 v1;
+    vec3 v2;
+};
+
+typedef hittable sphere;
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> Result;
+StructuredBuffer<hittable> Objects;
+StructuredBuffer<material> Materials;
+
+Texture2D<float4> SampleTex;
+int SampleTexWidth;
+int SampleTexHeight;
+
+RWStructuredBuffer<float4> debug;
+
+
+
+
+ray ray_new(point3 origin, vec3 direction, float t){
+    ray r;
+    r.orig = origin;
+    r.dir = direction;
+    r.tm = t;
+    return r;
+}
+
+ray ray_new(point3 origin, vec3 direction){
+    return ray_new(origin, direction, 0);
+}
+
+ray ray_new(){
+    return ray_new(point3(0, 0, 0), vec3(0, 1, 0));
+}
+
+point3 ray_at(const ray r, float t){
+    return r.orig + t*r.dir;
+}
+
+interval interval_new(float min, float max)
+{
+    interval res;
+    res.min = min;
+    res.max = max;
+    return res;
+}
+
+interval interval_new(){ return interval_new(POS_INF, NEG_INF); }
+
+interval interval_new(interval a, interval b)
+{
+    // Create the interval tightly enclosing the two input intervals.    
+    interval res;
+    res.min = a.min <= b.min ? a.min : b.min;
+    res.max = a.max >= b.max ? a.max : b.max;
+    return res;
+}
+
+interval interval_empty(){ return interval_new(); }
+
+interval interval_universe(){ return interval_new(NEG_INF, POS_INF); }
+
+float interval_size(interval i){ return i.max - i.min; }
+
+bool interval_contains(interval i, float x)  { return i.min <= x && x <= i.max; }
+
+bool interval_surrounds(interval i, float x)  { return i.min < x && x < i.max; }
+
+float interval_clamp(interval i, float x) 
+{
+    if (x < i.min) return i.min;
+    if (x > i.max) return i.max;
+    return x;
+}
+
+interval interval_expand(interval i, float delta) 
+{
+    float padding = delta / 2;
+    return interval_new(i.min - padding, i.max + padding);
+}
+
+aabb aabb_new(interval x, interval y, interval z)
+{
+    aabb r;
+    r.x = x;
+    r.y = y;
+    r.z = z;
+    return r;
+}
+
+aabb aabb_new() { return aabb_new(interval_new(), interval_new(), interval_new()); }
+
+aabb aabb_new(point3 a, point3 b)
+{
+    // Treat the two points a and b as extrema for the bounding box, so we don't require a
+    // particular minimum/maximum coordinate order.
+
+    interval x, y, z;
+    if (a[0] <= b[0])
+        x = interval_new(a[0], b[0]);
+    else
+        x = interval_new(b[0], a[0]);
+
+    if (a[1] <= b[1])
+        y = interval_new(a[1], b[1]);
+    else
+        y = interval_new(b[1], a[1]);
+
+    if (a[2] <= b[2])
+        z = interval_new(a[2], b[2]);
+    else
+        z = interval_new(b[2], a[2]);
+
+    aabb r;
+    r.x = x;// (a[0] <= b[0]) ? interval_new(a[0], b[0]) : interval_new(b[0], a[0]);
+    r.y = y;// (a[1] <= b[1]) ? interval_new(a[1], b[1]) : interval_new(b[1], a[1]);
+    r.z = z;// (a[2] <= b[2]) ? interval_new(a[2], b[2]) : interval_new(b[2], a[2]);
+    return r;
+}
+
+aabb aabb_new(aabb box0, aabb box1)
+{
+    aabb r;
+    r.x = interval_new(box0.x, box1.x);
+    r.y = interval_new(box0.y, box1.y);
+    r.z = interval_new(box0.z, box1.z);
+    return r;
+}
+
+const interval aabb_axis_interval(aabb b, int n) 
+{
+    if (n == 1) return b.y;
+    if (n == 2) return b.z;
+    return b.x;
+}
+
+bool aabb_hit(aabb b, const ray r, interval ray_t)
+{
+    const point3 ray_orig = r.orig;
+    const vec3 ray_dir = r.dir;
+
+    for (int axis = 0; axis < 3; axis++) {
+        const interval ax = aabb_axis_interval(b, axis);
+        const float adinv = 1.0 / ray_dir[axis];
+
+        float t0 = (ax.min - ray_orig[axis]) * adinv;
+        float t1 = (ax.max - ray_orig[axis]) * adinv;
+
+        if (t0 < t1) {
+            if (t0 > ray_t.min) ray_t.min = t0;
+            if (t1 < ray_t.max) ray_t.max = t1;
+        } else {
+            if (t1 > ray_t.min) ray_t.min = t1;
+            if (t0 < ray_t.max) ray_t.max = t0;
+        }
+
+        if (ray_t.max <= ray_t.min)
+                return false;
+    }
+    return true;
+}
+
+hit_record hit_record_new()
+{
+    hit_record rec;
+    rec.position = point3(0, 0, 0);
+    rec.normal = vec3(0, 1, 0);
+    rec.mat = 0;
+    rec.t = 0;
+    rec.uv = float2(0,0);
+    rec.front_face = true;
+    return rec;
+}
+
+void hit_record_set_face_normal(inout hit_record h, const ray r, const vec3 outward_normal)
+{
+    // Sets the hit record normal vector.
+    // NOTE: the parameter `outward_normal` is assumed to have unit length.
+
+    h.front_face = dot(r.dir, outward_normal) < 0;
+    h.normal = h.front_face ? outward_normal : -outward_normal;
+}
+
+color sample_texture(float2 uv)
+{
+    // If we have no texture data, then return solid cyan as a debugging aid.
+    if (SampleTexHeight <= 0)
+        return color(0, 1, 1);
+
+    // Clamp input texture coordinates to [0,1] x [1,0]
+    float u = interval_clamp(interval_new(0, 1), uv.x);
+    float v = 1.0 - interval_clamp(interval_new(0, 1), uv.y); // Flip V to image coordinates
+
+    int i = int(u * SampleTexWidth);
+    int j = int(v * SampleTexHeight);
+    float4 pixel = SampleTex[int2(i, j)];
+
+    return pixel.xyz;
+}
+
+
+bool material_scatter_none(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
+{
+    attenuation = color(0, 0, 0);
+    scattered = r_in;
+    return false;
+}
+
+color material_emitted_lambertian(const material mat, float2 uv){
+    return color(1, 1, 1);
+}
+
+bool material_scatter_lambertian(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
+{
+    if (mat.does_emit)
+        return false;
+
+    vec3 ran_vec = random_unit_vector(state);
+    vec3 scatter_direction = rec.normal + ran_vec;
+
+    // Catch degenerate scatter direction
+    if (vec3_near_zero(scatter_direction))
+        scatter_direction = rec.normal;
+
+    scattered = ray_new(rec.position, scatter_direction, r_in.tm);
+    attenuation = mat.albedo;// sample_texture(rec.uv);// mat.albedo;
+    return true;
+}
+
+bool material_scatter_metal(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
+{
+    vec3 reflected = vec3_reflect(r_in.dir, rec.normal);
+    reflected = unit_vector(reflected) + (mat.fuzz * random_unit_vector(state));
+    scattered = ray_new(rec.position, reflected, r_in.tm);
+    attenuation = mat.albedo;
+    return (dot(scattered.dir, rec.normal) > 0);
+}
+
+float material_dielectric_reflectance(float cosine, float refraction_index) {
+    // Use Schlick's approximation for reflectance.
+    float r0 = (1 - refraction_index) / (1 + refraction_index);
+    r0 = r0 * r0;
+    return r0 + (1 - r0) * pow((1 - cosine), 5);
+}
+
+bool material_scatter_dielectric(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
+{
+    attenuation = mat.albedo;
+    float ri = rec.front_face ? (1.0 / mat.refraction_index) : (mat.refraction_index);
+
+    vec3 unit_direction = unit_vector(r_in.dir);
+    float cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+    float sin_theta = sqrt(1.0 - cos_theta*cos_theta); 
+
+    bool cannot_refract = ri * sin_theta > 1.0;
+    vec3 direction;
+
+    if (cannot_refract || material_dielectric_reflectance(cos_theta, ri) > random_double(state))
+        direction = vec3_reflect(unit_direction, rec.normal);
+    else 
+        direction = vec3_refract(unit_direction, rec.normal, ri);
+
+    scattered = ray_new(rec.position, direction, r_in.tm);
+    return true;
+}
+
+bool material_scatter(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
+{
+    switch(mat.material_type)
+    {
+        case MATERIAL_TYPE_LAMBERTIAN:
+            return material_scatter_lambertian(state, mat, r_in, rec, /*out*/ attenuation, /*out*/ scattered);
+            break;
+        case MATERIAL_TYPE_METAL:
+            return material_scatter_metal(state, mat, r_in, rec, /*out*/ attenuation, /*out*/ scattered);
+            break;
+        case MATERIAL_TYPE_DIELECTRIC:
+            return material_scatter_dielectric(state, mat, r_in, rec, /*out*/ attenuation, /*out*/ scattered);
+            break;
+        default:
+            return material_scatter_none(state, mat, r_in, rec, /*out*/ attenuation, /*out*/ scattered);
+            break;
+    }
+}
+
+bool material_emitted(const material mat, float2 uv)
+{
+    if (mat.does_emit == 0)
+        return color(0, 0, 0);
+
+    switch(mat.material_type)
+    {
+        case MATERIAL_TYPE_LAMBERTIAN:
+            return material_emitted_lambertian(mat, uv);
+            break;
+        case MATERIAL_TYPE_METAL:
+            return color(0, 0, 0);
+            break;
+        case MATERIAL_TYPE_DIELECTRIC:
+            return color(0, 0, 0);
+            break;
+        default:
+            return color(0, 0, 0);
+            break;
+    }
+}
+
+material material_get(mat_ID id)
+{
+    return Materials[id];
+}
+
+sphere hittable_sphere_new(point3 center1, point3 center2, float radius, mat_ID mat)
+{
+    vec3 rvec = vec3(radius, radius, radius);
+
+    hittable r;
+    r.hittable_type = HITTABLE_TYPE_SPHERE;
+    r.center = ray_new(center1, center2 - center1);
+    r.radius = radius;
+    r.mat = mat;
+
+    aabb box1 = aabb_new(ray_at(r.center, 0) - rvec, ray_at(r.center, 0) + rvec);
+    aabb box2 = aabb_new(ray_at(r.center, 1) - rvec, ray_at(r.center, 1) + rvec);
+
+    r.bbox = aabb_new(box1, box2);
+    return r;
+}
+
+sphere hittable_sphere_new(point3 static_center, float radius, mat_ID mat){
+    return hittable_sphere_new(static_center, static_center, radius, mat);
+}
+
+float2 get_sphere_uv(const point3 p)
+{
+    float theta = acos(-p.y);
+    float phi = atan2(-p.z, p.x) + PI;
+
+    return float2(
+        phi / (2*PI),
+        theta / PI
+    );
+}
+
+bool hittable_hit_sphere(inout rand_state state, const hittable hit, const ray r, interval ray_t, inout hit_record rec)
+{
+    point3 current_center = hit.center.orig;//ray_at(hit.center, r.tm);
+    vec3 oc = current_center - r.orig;
+    float a = length_squared(r.dir);
+    float h = dot(r.dir, oc);
+    float c = length_squared(oc) - hit.radius*hit.radius;
+
+    //debug[C_2D_to_1D(id, Width)] = float4(current_center.xyz, r.tm);
+
+    float discriminant = h*h - a*c;
+    if (discriminant < 0)
+        return false;
+
+    float sqrtd = sqrt(discriminant);
+
+    // Find the nearest root that lies in the acceptable range.
+    float root = (h - sqrtd) / a;
+    if (!interval_surrounds(ray_t, root)){
+        root = (h + sqrtd) / a;
+        if (!interval_surrounds(ray_t, root))
+            return false;
+    }
+
+    rec.t = root;
+    rec.position = ray_at(r, rec.t);
+    vec3 outward_normal = (rec.position - current_center) / hit.radius;
+    hit_record_set_face_normal(rec, r, outward_normal);
+    rec.uv = get_sphere_uv(outward_normal);
+    rec.mat = hit.mat;
+
+    //debug[C_2D_to_1D(state.id, Width)] = float4(rec.normal.xyz, 1);
+
+    return true;
+}
+
+bool quad_is_interior(float a, float b, inout hit_record rec){
+    interval unit_interval = interval_new(0, 1);
+    // Given the hit point in plane coordinates, return false if it is outside the
+    // primitive, otherwise set the hit record UV coordinates and return true.
+
+    if (!interval_contains(unit_interval, a) || !interval_contains(unit_interval, b))
+        return false;
+
+    rec.uv = float2(a, b);
+    return true;
+}
+
+bool hittable_hit_quad(inout rand_state state, const hittable hit, const ray r, interval ray_t, inout hit_record rec)
+{
+    float denom = dot(hit.normal, r.dir);
+
+    // No hit if the ray is parallel to the plane.
+    if (abs(denom) < 1e-8)
+        return false;
+
+    // Return false if the hit point parameter t is outside the ray interval.
+    float t = (hit.D - dot(hit.normal, r.orig)) / denom;
+    if (!interval_contains(ray_t, t))
+        return false;
+    
+    point3 intersection = ray_at(r, t);
+    vec3 planer_hitpt_vector = intersection - hit.Q;
+    float alpha = dot(hit.w, cross(planer_hitpt_vector, hit.v));
+    float beta = dot(hit.w, cross(hit.u, planer_hitpt_vector));
+
+    rec.uv = float2(0, 0);
+    if (!quad_is_interior(alpha, beta, rec))
+        return false;
+
+    // Ray hits the 2D shape; set the rest of the hit record and return true.
+    rec.t = t;
+    rec.position = intersection;
+    rec.mat = hit.mat;
+    hit_record_set_face_normal(rec, r, hit.normal);
+
+    return true;
+}
+
+bool hittable_hit_triangle(inout rand_state state, const hittable hit, const ray r, interval ray_t, inout hit_record rec)
+{
+    // Möller-Trumbore method
+
+    vec3 v0v1 = hit.v1 - hit.v0;
+    vec3 v0v2 = hit.v2 - hit.v0;
+    vec3 pvec = cross(r.dir, v0v2);
+    float det = dot(v0v1, pvec);
+
+    const float kEplsilon = 1e-8;
+
+    const bool culling = false;
+
+    if (culling){
+        // If the determinant is negative, the triangle is back-facing.
+        // If the determinant is close to 0, the ray misses the triangle
+        if (det < kEplsilon) return false;
+    }
+    else{
+        // If det is close to 0, the ray and triangle are parellel
+        if (abs(det) < kEplsilon) return false;
+    }
+
+    float invDet = 1 / det;
+
+    vec3 tvec = r.orig - hit.v0;
+    float u = dot(tvec, pvec) * invDet;
+    if (u < 0 || u > 1) return false;
+
+    vec3 qvec = cross(tvec, v0v1);
+    float v = dot(r.dir, qvec) * invDet;
+    if (v < 0 || u + v > 1) return false;
+
+    float t = dot(v0v2, qvec) * invDet;
+
+    return true;
+}
+
+bool hittable_hit(inout rand_state state, const hittable h, const ray r, interval ray_t, inout hit_record rec)
+{
+    switch(h.hittable_type)
+    {
+        case HITTABLE_TYPE_SPHERE:
+            return hittable_hit_sphere(state, h, r, ray_t, /*out*/ rec);
+            break;
+        case HITTABLE_TYPE_QUAD:
+            return hittable_hit_quad(state, h, r, ray_t, /*out*/ rec);
+            break;
+        default:
+            return false;
+            break;
+    }
+}
+
+bool hittable_list_hit(inout rand_state state, const ray r, interval ray_t, inout hit_record rec)
+{
+    hit_record temp_rec = hit_record_new();
+    bool hit_anything = false;
+    float closest_so_far = ray_t.max;
+
+    for (int i = 0; i < NumObjects; i++) //NumObjects
+    {
+        if (Objects[i].enabled != 1)
+            continue;
+        if (hittable_hit(state, Objects[i], r, interval_new(ray_t.min, closest_so_far), /*out*/ temp_rec)){
+            hit_anything = true;
+            closest_so_far = temp_rec.t;
+            rec = temp_rec;
+        }
+    }
+
+    return hit_anything;
+}
+
+bool hittable_world_hit(inout rand_state state, const ray r, interval ray_t, inout hit_record rec)
+{
+    return hittable_list_hit(state, r, ray_t, /*out*/ rec);
+}
+
+
+vec3 sample_square(inout rand_state state) {
+    // Returns the vector to a random point in the [-.5,-.5]-[+.5,+.5] unit square.
+    return vec3(random_double(state) - 0.5, random_double(state) - 0.5, 0);
+}
+
+color ray_color(inout rand_state state, ray r, int depth)
+{
+    // If we've exceeded the ray bounce limit, no more light is gathered.
+    //if (depth <= 0)
+    //    return color(0, 0, 0);
+
+    /*hit_record rec = hit_record_new();
+
+    if (hittable_world_hit(state, r, interval_new(0.001, POS_INF), rec))
+    {
+        ray scattered = ray_new();
+        color attenuation = color(0, 0, 0);
+        return color(1, 1, 1);
+        if (material_scatter(state, material_get(rec.mat), r, rec, attenuation, scattered)){
+            return attenuation;
+        }
+        return color(0, 0, 0);
+    }
+    else{
+        return color(0,0,0);
+    }
+    vec3 unit_direction = unit_vector(r.dir);
+    float a = 0.5 * (unit_direction.y + 1.0);
+    cur_color *= ((1.0 - a) * color(1.0, 1.0, 1.0) + a * color(0.5, 0.7, 1.0));
+    return cur_color;*/
+    
+
+    color cur_color = color(1, 1, 1);
+    color background_color = color(0.0, 0.0, 0.0);
+    
+
+    //debug[C_2D_to_1D(id, Width)] = float4(0, 0, 0, 0);
+
+    /*hit_record rec = hit_record_new();
+    if (hittable_hit_sphere(state, Objects[0], r, interval_new(0.001, POS_INF), rec)){
+        ray scattered = ray_new();
+        color attenuation = color(0, 0, 0);
+        //debug[C_2D_to_1D(id, Width)] = float4(1, material_get(rec.mat).albedo.xyz);
+        //debug[C_2D_to_1D(state.id, Width)] = float4(rec.normal.xyz, 1);
+        //debug[C_2D_to_1D(state.id, Width)] = float4(rec.normal.xyz, 1);
+        if (material_scatter_lambertian(state, material_get(rec.mat), r, rec, attenuation,  scattered)){
+            cur_color *= attenuation;
+            r = scattered;
+            //debug[C_2D_to_1D(state.id, Width)] = float4(scattered.dir.xyz, 1);
+        }
+        else{
+            cur_color = color(0, 0, 0);
+        }
+        //debug[C_2D_to_1D(id, Width)] = float4(1, rec.t, 0, 0);
+    }
+
+    vec3 unit_direction = unit_vector(r.dir);
+    float a = 0.5 * (unit_direction.y + 1.0);
+    cur_color *= (1.0 - a) * color(1.0, 1.0, 1.0) + a * color(0.5, 0.7, 1.0);
+    return cur_color;*/
+
+    int i = 0;
+    while (true)
+    {
+        if (depth <= 0){
+            cur_color = color(0, 0, 0);
+            break;
+        }
+
+        hit_record rec = hit_record_new();
+        
+
+        if (hittable_world_hit(state, r, interval_new(0.001, POS_INF), rec))
+        {
+            ray scattered = ray_new();
+            color attenuation = color(0, 0, 0);
+            color col_from_emittion = material_emitted(material_get(rec.mat), rec.uv);
+            if (material_scatter(state, material_get(rec.mat), r, rec, attenuation,  scattered)){
+                color col_from_scatter = (cur_color * attenuation);
+                cur_color = col_from_scatter + col_from_emittion;
+                r = scattered;
+            }
+            else{
+                cur_color *= col_from_emittion;
+                break;
+            }
+        }
+        else{
+            vec3 unit_direction = unit_vector(r.dir);
+            float a = 0.5 * (unit_direction.y + 1.0);
+            color sky_col = (1.0 - a) * color(1.0, 1.0, 1.0) + a * color(0.5, 0.7, 1.0);
+            cur_color *= background_color;//(sky_col);
+            break;
+        }
+
+        depth -= 1;
+        i++;
+    }
+
+    return cur_color;
+}
+
+
+
+void write_color(int3 id, color pixel_color){
+    float r = pixel_color.x;
+    float g = pixel_color.y;
+    float b = pixel_color.z;
+
+    interval intensity = interval_new(0.000, 0.999);
+    r = interval_clamp(intensity, linear_to_gamma(r));
+    g = interval_clamp(intensity, linear_to_gamma(g));
+    b = interval_clamp(intensity, linear_to_gamma(b));
+
+    Result[id.xy] = float4(r, g, b, 1.0);
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    float pixel_samples_scale = 1.0 / SamplesPerPixel;
+    point3 center = LookFrom;
+
+    // Determine viewport dimensions.
+
+    float theta = degrees_to_radians(VFOV);
+    float h = tan(theta / 2.0);
+    float viewport_height = 2.0f * h * FocusDist;
+    float viewport_wdith = viewport_height * (float(Width)/Height);
+
+    vec3 w = unit_vector(LookFrom - LookAt);
+    vec3 u = unit_vector(cross(VUP, w));
+    vec3 v = cross(w, u);
+
+
+    // Calculate the vectors across the horizontal and down the vertical viewport edges.
+
+    vec3 viewport_u = viewport_wdith * -u;
+    vec3 viewport_v = viewport_height * v;
+
+
+
+    // Calculate the horizontal and vertical delta vectors from pixel to pixel.
+
+    vec3 pixel_delta_u = viewport_u / Width;
+    vec3 pixel_delta_v = viewport_v / Height;
+
+
+    // Calculate the location of the upper left pixel.
+
+    vec3 viewport_upper_left = center - (FocusDist * w) - viewport_u/2 - viewport_v/2;
+    vec3 pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
+
+    float defocus_radius = FocusDist * tan(degrees_to_radians(DefocusAngle / 2));
+    vec3 defocus_disk_u = u * defocus_radius;
+    vec3 defocus_disk_v = v * defocus_radius;
+
+
+    // Construct a camera ray originating from the defocus disk and directed at a randomly
+    // sampled point around the pixel location i, j.
+    int i = id.x;
+    int j = id.y;
+
+    //debug[C_2D_to_1D(id, Width)] = float4(ht.center.orig.xyz, 1);
+
+    rand_state state = rand_state_new(id);
+    
+    color pixel_color = color(0, 0, 0);
+    for (int sample = 0; sample < SamplesPerPixel; sample++)
+    {
+        vec3 offset = sample_square(state);
+        vec3 pixel_sample = pixel00_loc +
+                            ((i + offset.x) * pixel_delta_u) +
+                            ((j + offset.y) * pixel_delta_v);
+
+        
+        // Returns a random point in the camera defocus disk.
+        vec3 p = random_in_unit_disk(state);
+        point3 def_sample = center + (p[0] * defocus_disk_u) + (p[1] * defocus_disk_v);
+        point3 ray_origin = (DefocusAngle <= 0.0001) ? center : def_sample;
+        float ray_time = random_double(state);
+
+        vec3 ray_direction = pixel_sample - ray_origin;
+    
+        ray r = ray_new(ray_origin, ray_direction, ray_time);
+        pixel_color += ray_color(state, r, MaxDepth);
+    }
+
+    //debug[C_2D_to_1D(id, Width)] = float4(rVec.xyz,  n);
+
+    write_color(id, pixel_color * pixel_samples_scale);
+
+
+
+    //Result[id.xy] = float4(id.x / (float)Width, id.y / (float)Height, t, 1);
+    //Result[id.xy] = float4(id.x & id.y, (id.x & 15)/15.0, (id.y & 15)/15.0, 0.0);
+}

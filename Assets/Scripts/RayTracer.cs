@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Palmmedia.ReportGenerator.Core;
 using UnityEngine;
 
 public class RayTracer : MonoBehaviour
@@ -14,9 +15,12 @@ public class RayTracer : MonoBehaviour
     public int Initial_Buffer_Size = 10;
     private int cur_buffer_size;
 
+    public Texture2D test_tex;
+
     private int trc_k_id = 0;
     private ComputeBuffer RandStateBuffer;
     private ComputeBuffer ObjectBuffer;
+    private ComputeBuffer PolyBuffer;
     private ComputeBuffer MaterialBuffer;
     private ComputeBuffer DebugBuffer;
 
@@ -29,7 +33,9 @@ public class RayTracer : MonoBehaviour
 
     public enum HittableType : int
     {
-        Sphere = 1
+        Sphere = 1,
+        Quad = 2,
+        Poly = 3
     }
 
     struct TRay{
@@ -80,17 +86,18 @@ public class RayTracer : MonoBehaviour
 
     struct TMaterial{
         public int material_type;
+        public int does_emit;
         public Vector3 albedo;
         public float fuzz;
         public float refraction_index;
 
         public static int SizeOf()
         {
-            return sizeof(int) + sizeof(float) * 3 + sizeof(float) * 2;
+            return sizeof(int) + sizeof(int) + sizeof(float) * 3 + sizeof(float) * 2;
         }
     };
 
-    struct THittable{
+    /*struct THittable{
         public int hittable_type;
         public int enabled;
         public TRay center;
@@ -99,13 +106,57 @@ public class RayTracer : MonoBehaviour
 
         public float radius; //sphere
 
+        // Quad
+        public Vector3 Q;
+        public Vector3 u, v;
+        public Vector3 w;
+        public Vector3 normal;
+        public float D;
+
         public static int SizeOf()
         {
-            return sizeof(int) + sizeof(int) + TRay.SizeOf() + sizeof(int) + TAABB.SizeOf() + sizeof(float);
+            return  sizeof(int) + sizeof(int) + TRay.SizeOf() + sizeof(int) + TAABB.SizeOf() + 
+                    sizeof(float) +
+                    sizeof(float) * 3 * 5 + sizeof(float);
+        }
+    };*/
+
+    struct THittObject
+    {
+        public int hittable_type;
+        public int enabled;
+        public int poly_start_idx;
+        public int poly_num;
+        public Matrix4x4 rotation;
+        public TRay center;
+        public int mat;
+        public TAABB bbox;
+        public Vector4 attr1;
+
+        public static int SizeOf()
+        {
+            return sizeof(int) * 5 +
+                    sizeof(float) * 4 * 4 +
+                   TRay.SizeOf() + TAABB.SizeOf() + 
+                   sizeof(float) * 4;
+        }
+    }
+
+    struct THitPoly{
+        public int hit_obj_idx;
+        public Vector4 attr1;
+        public Vector4 attr2;
+        public Vector4 attr3;
+        public Vector4 attr4;
+
+        public static int SizeOf()
+        {
+            return sizeof(int) + sizeof(float) * 4 * 4;
         }
     };
 
-    struct SceneObject
+
+    class SceneObject
     {
         public int ID;
         public int Index;
@@ -113,17 +164,20 @@ public class RayTracer : MonoBehaviour
         public RayTracedObject.ObjectInfo Obj_Info;
         public RayTracedObject.MaterialInfo Mat_Info;
 
+        public int Poly_Offset;
+
         public TMaterial get_TMat()
         {
             TMaterial res = new TMaterial();
             res.material_type = (int)Mat_Info.Material_Type;
+            res.does_emit = Mat_Info.Emits ? 1 : 0;
             res.albedo = Mat_Info.Albedo;
             res.fuzz = Mat_Info.Fuzz;
             res.refraction_index = Mat_Info.Refraction_Index;
             return res;
         }
 
-        public THittable get_THitt()
+        /*public THittObject get_THitt()
         {
             THittable res = new THittable();
             res.hittable_type = (int)Obj_Info.Object_Type;
@@ -131,13 +185,60 @@ public class RayTracer : MonoBehaviour
             res.center = new TRay(Obj_Info.Center);
             res.radius = Obj_Info.Radius;
             res.mat = Index;
+
+            res.Q = Obj_Info.Q;
+            res.u = Obj_Info.u;
+            res.v = Obj_Info.v;
+
+            Vector3 n = Vector3.Cross(res.u, res.v);
+            res.normal = n.normalized;
+            res.D = Vector3.Dot(res.normal, res.Q);
+            res.w = n / Vector3.Dot(n, n);
+
             return res;
+        }*/
+
+        public THittObject get_THitt()
+        {
+            THittObject res = new THittObject();
+            res.hittable_type = (int)Obj_Info.Object_Type;
+            res.enabled = Enabled ? 1 : 0;
+            res.poly_start_idx = Poly_Offset;
+            res.poly_num = Obj_Info.Polygons.Count;
+            res.center = new TRay(Obj_Info.Center);
+            res.mat = Index;
+            res.rotation = Obj_Info.Rotation;
+
+            return res;
+
+        }
+
+        public THitPoly[] Get_TPoly()
+        {
+            List<THitPoly> res = new List<THitPoly>();
+            res.Capacity = Obj_Info.Polygons.Count;
+
+            foreach (var p in Obj_Info.Polygons)
+            {
+                THitPoly rp = new THitPoly();
+                rp.hit_obj_idx = Index;
+                rp.attr1 = p.V0;
+                rp.attr2 = p.V1;
+                rp.attr3 = p.V2;
+                res.Add(rp);
+            }
+
+            return res.ToArray();
         }
     }
     int cur_id = 0;
     Dictionary<int, SceneObject> SceneObjectsMap;
-    THittable[] hittables_buffer;
+    THittObject[] hittables_buffer;
+    THitPoly[] hittable_poly_buffer;
     TMaterial[] materials_buffer;
+
+    float timer = 1.0f;
+    bool should_sync_poly = false;
 
     public int AddObject(RayTracedObject.ObjectInfo obj_info, RayTracedObject.MaterialInfo mat_info)
     {
@@ -150,14 +251,25 @@ public class RayTracer : MonoBehaviour
         hittables_buffer[obj.Index] = obj.get_THitt();
         materials_buffer[obj.Index] = obj.get_TMat();
         SceneObjectsMap.Add(obj.ID, obj);
+
+        if (obj_info.Object_Type == HittableType.Poly)
+        {
+            should_sync_poly = true;
+        }
+
         return obj.ID;
     }
 
     public void RemoveObject(int id)
     {
         SceneObject obj = SceneObjectsMap[id];
-        hittables_buffer[obj.Index].enabled = 0;
         SceneObjectsMap.Remove(id);
+        hittables_buffer[obj.Index].enabled = 0;
+
+        if (obj.Obj_Info.Object_Type == HittableType.Poly)
+        {
+            should_sync_poly = true;
+        }
     }
 
     // Start is called once before the first execution of Update after the MonoBehaviour is created
@@ -167,13 +279,14 @@ public class RayTracer : MonoBehaviour
 
         cur_buffer_size = Initial_Buffer_Size;
         SceneObjectsMap = new Dictionary<int, SceneObject>();
-        hittables_buffer = new THittable[Initial_Buffer_Size];
+        hittables_buffer = new THittObject[Initial_Buffer_Size];
         materials_buffer = new TMaterial[Initial_Buffer_Size];
-        ObjectBuffer = new ComputeBuffer(Initial_Buffer_Size, THittable.SizeOf());
+        ObjectBuffer = new ComputeBuffer(Initial_Buffer_Size, THittObject.SizeOf());
         MaterialBuffer = new ComputeBuffer(Initial_Buffer_Size, TMaterial.SizeOf());
 
         for (int i = 0; i < Initial_Buffer_Size; i++)
         {
+            hittables_buffer[i].hittable_type = 0;
             hittables_buffer[i].enabled = 0;
         }
 
@@ -187,6 +300,10 @@ public class RayTracer : MonoBehaviour
         trc_shader.SetInt("MaxDepth", MaxDepth);
         trc_shader.SetInt("Seed", seed);
 
+        trc_shader.SetTexture(trc_k_id, "SampleTex", test_tex);
+        trc_shader.SetInt("SampleTexWidth", test_tex.width);
+        trc_shader.SetInt("SampleTexHeight", test_tex.height);
+
         int total_size = renderTexturel.width * renderTexturel.height;
 
         //RandStateBuffer = new ComputeBuffer(total_size, sizeof(float));
@@ -199,47 +316,6 @@ public class RayTracer : MonoBehaviour
         trc_shader.SetBuffer(trc_k_id, "debug", DebugBuffer);
 
         
-
-        //TRay o_center_1 = new TRay{orig=new Vector3(0, 1, 2), dir=Vector3.one, tm=0};
-        //TRay o_center_2 = new TRay{orig=new Vector3(-1, 1, 2), dir=Vector3.one, tm=0};
-
-        /*TMaterial[] materials =
-        {
-            new TMaterial
-            {
-                material_type=(int)MaterialType.Metal,
-                albedo=new Vector3(0.9f, 0.9f, 0.9f),
-                fuzz=0.05f
-            },
-            new TMaterial
-            {
-                material_type=(int)MaterialType.Metal,
-                albedo=new Vector3(0.9f, 0.9f, 0.9f),
-                fuzz=0.06f
-            }
-        };*/
-
-        /*THittable[] objects =
-        {
-            new THittable{
-                hittable_type=(int)HittableType.Sphere,
-                center=o_center_1,
-                mat=0,
-                radius=0.3f
-            },
-            new THittable{
-                hittable_type=(int)HittableType.Sphere,
-                center=o_center_2,
-                mat=1,
-                radius=0.5f
-            }
-        };*/
-
-        
-        
-
-        //ObjectBuffer.SetData(objects);
-        //MaterialBuffer.SetData(materials);
         
 
         /*Debug.LogFormat("Start render");
@@ -262,14 +338,53 @@ public class RayTracer : MonoBehaviour
 
         watch.Stop();
         Debug.LogFormat("Stop render : {0} ms", watch.Elapsed.TotalMilliseconds);*/
+
     }
 
+    bool did_shoot = false;
     // Update is called once per frame
     void Update()
     {
-        sync_objects();
-        render();
+        if (should_sync_poly)
+        {
+            should_sync_poly = false;
+            sync_polygons();
+        }
+
+        timer -= Time.deltaTime;
+        if (timer <= 0 && !did_shoot){
+            Debug.LogFormat("Start render");
+            System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();  
+
+            sync_objects();
+            render();
+            did_shoot = true;
+
+            watch.Stop();
+            Debug.LogFormat("Render: {0} ms", watch.Elapsed.TotalMilliseconds);
+        }
     }
+
+    void sync_polygons()
+    {
+        List<THitPoly> all_polygons = new List<THitPoly>();
+        all_polygons.Capacity = 1000;
+
+        int cur_idx = 0;
+        foreach (KeyValuePair<int, SceneObject> entry in SceneObjectsMap)
+        {
+            THitPoly[] polygons = entry.Value.Get_TPoly();
+            all_polygons.AddRange(polygons);
+            entry.Value.Poly_Offset = cur_idx;
+            cur_idx += polygons.Length;
+        }
+        hittable_poly_buffer = all_polygons.ToArray();
+        PolyBuffer = new ComputeBuffer(Mathf.Max(1, hittable_poly_buffer.Length), THitPoly.SizeOf());
+        PolyBuffer.SetData(hittable_poly_buffer);
+        trc_shader.SetBuffer(trc_k_id, "Polygons", PolyBuffer);
+    }
+
+    
 
     int find_next_index()
     {
@@ -299,7 +414,7 @@ public class RayTracer : MonoBehaviour
     void render()
     {
         int seed = Random.Range(System.Int32.MinValue, System.Int32.MaxValue);
-        trc_shader.SetInt("Seed", seed);
+        //trc_shader.SetInt("Seed", seed);
         trc_shader.SetFloat("VFOV", 90);
         trc_shader.SetVector("LookFrom", transform.position);
         trc_shader.SetVector("LookAt", transform.position + transform.forward);
@@ -309,6 +424,17 @@ public class RayTracer : MonoBehaviour
         trc_shader.SetInt("NumObjects", cur_buffer_size);
 
         trc_shader.Dispatch(trc_k_id, renderTexturel.width / 8, renderTexturel.height / 8, 1);
+
+        int total_size = renderTexturel.width * renderTexturel.height;
+        Vector4[] debug_vals = new Vector4[total_size];
+        DebugBuffer.GetData(debug_vals);
+
+        for(uint i = 0; i < total_size; i++)
+        {
+            Vector2Int ipos = C_1D_to_2D(i, (uint)renderTexturel.width);
+            if (debug_vals[i].x >= 1)
+                Debug.LogFormat("({0}, {1}): {2}", ipos.x, ipos.y, debug_vals[i].ToString());
+        }
     }
 
     uint C_2D_to_1D(int x, int y, uint width) {
