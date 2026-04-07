@@ -109,7 +109,7 @@ public class RayTracedObject : MonoBehaviour
             case RayTracer.HittableType.Poly:
                 load_polygons();
                 Object_Info.Center = transform.position;
-                Object_Info.Rotation = Matrix4x4.Rotate(transform.rotation);
+                Object_Info.Rotation = Matrix4x4.Rotate(transform.rotation) * Matrix4x4.Scale(transform.lossyScale);
                 break;
         }
 

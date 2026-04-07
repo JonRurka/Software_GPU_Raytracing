@@ -13,6 +13,7 @@ public class RayTracer : MonoBehaviour
     public int SamplesPerPixel;
     public int MaxDepth;
     public int Initial_Buffer_Size = 10;
+    public bool debug_print = false;
     private int cur_buffer_size;
 
     public Texture2D test_tex;
@@ -425,15 +426,17 @@ public class RayTracer : MonoBehaviour
 
         trc_shader.Dispatch(trc_k_id, renderTexturel.width / 8, renderTexturel.height / 8, 1);
 
-        int total_size = renderTexturel.width * renderTexturel.height;
-        Vector4[] debug_vals = new Vector4[total_size];
-        DebugBuffer.GetData(debug_vals);
+        if (debug_print){
+            int total_size = renderTexturel.width * renderTexturel.height;
+            Vector4[] debug_vals = new Vector4[total_size];
+            DebugBuffer.GetData(debug_vals);
 
-        for(uint i = 0; i < total_size; i++)
-        {
-            Vector2Int ipos = C_1D_to_2D(i, (uint)renderTexturel.width);
-            if (debug_vals[i].x >= 1)
-                Debug.LogFormat("({0}, {1}): {2}", ipos.x, ipos.y, debug_vals[i].ToString());
+            for(uint i = 0; i < total_size; i++)
+            {
+                Vector2Int ipos = C_1D_to_2D(i, (uint)renderTexturel.width);
+                if (debug_vals[i].x >= 1)
+                    Debug.LogFormat("({0}, {1}): {2}", ipos.x, ipos.y, debug_vals[i].ToString());
+            }
         }
     }
 
