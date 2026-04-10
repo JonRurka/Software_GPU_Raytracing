@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Linq;
+using System.Linq.Expressions;
 using Palmmedia.ReportGenerator.Core;
 using UnityEngine;
 
@@ -24,6 +26,7 @@ public class RayTracer : MonoBehaviour
     private ComputeBuffer PolyBuffer;
     private ComputeBuffer MaterialBuffer;
     private ComputeBuffer DebugBuffer;
+    private ComputeBuffer BvhBuffer;
 
     public enum MaterialType : int
     {
@@ -37,6 +40,163 @@ public class RayTracer : MonoBehaviour
         Sphere = 1,
         Quad = 2,
         Poly = 3
+    }
+
+    interface BVHable
+    {
+        TAABB BoundingBox();
+        int Index();
+    }
+
+    class TBVH<T> where T : BVHable
+    {
+        public struct BVH_Node
+        {
+            public int Leaf;
+            public int enabled;
+            public TAABB aabb;
+
+            public static int SizeOf()
+            {
+                return sizeof(int) * 2 + TAABB.SizeOf();
+            }
+        }
+
+        public TBVH<T> Left;
+        public TBVH<T> Right;
+        public TAABB Bbox;
+        public T Leaf;
+        public int Size;
+
+        public TBVH(T[] objects) : this(objects, 0, objects.Length)
+        {
+        }
+
+        public TBVH(T[] objects, int start, int end)
+        {
+            Leaf = default(T);
+
+            int axis = Random.Range(0, 2);
+            IComparer<T> comparator = 
+                  (axis == 0) ? new box_x_compare()
+                : (axis == 1) ? new box_y_compare()
+                : new box_z_compare();
+
+            int object_span = end - start;
+            //Size = object_span;
+            
+            if (object_span == 1)
+            {
+                Left = Right = null;
+                Leaf = objects[start];
+            }
+            else if (object_span == 2)
+            {
+                Left = new TBVH<T>(objects[start]);
+                Right = new TBVH<T>(objects[start + 1]);
+            }
+            else
+            {
+                System.Array.Sort(objects, start, end, comparator);
+                int mid = start + object_span / 2;
+                Left = new TBVH<T>(objects, start, mid);
+                Right = new TBVH<T>(objects, mid, end);
+            }
+
+            Bbox = new TAABB(Left.Bbox, Right.Bbox);
+        }
+
+        public TBVH(T obj)
+        {
+            Left = Right = null;
+            Leaf = obj;
+        }
+
+        public BVH_Node[] GetBuffer()
+        {
+            List<BVH_Node> res = new List<BVH_Node>();
+            res.Capacity = (int)System.Math.Pow(2, Size + 1) - 1;
+            //BVH_Node[] res = new BVH_Node[(int)System.Math.Pow(2, Size + 1) - 1];
+
+            Queue<TBVH<T>> queue = new Queue<TBVH<T>>();
+            queue.Append(this);
+
+            int level = 0;
+            int cur = 0;
+            while(queue.Count > 0)
+            {
+                int size = queue.Count;
+                for (int i = 0; i < size; i++)
+                {
+                    TBVH<T> node = queue.Dequeue();
+                    BVH_Node bvh_node = default;
+                    bvh_node.enabled = 1;
+                    bvh_node.aabb = node.Bbox;
+                    bvh_node.Leaf = (node.Leaf != null) ? (node.Leaf.Index()) : -1;
+                    res.Add(bvh_node);
+
+                    if (node.Left != null) queue.Append(node.Left);
+                    if (node.Right != null) queue.Append(node.Right);
+                }
+                level++;
+            }
+            return res.ToArray();
+            //return res;
+        }
+
+        private class box_x_compare: IComparer<T>
+        {
+            public int Compare(T a, T b)
+            {
+                return box_compare(a, b, 0);
+            }
+        }
+
+        private class box_y_compare: IComparer<T>
+        {
+            public int Compare(T a, T b)
+            {
+                return box_compare(a, b, 1);
+            }
+        }
+
+        private class box_z_compare: IComparer<T>
+        {
+            public int Compare(T a, T b)
+            {
+                return box_compare(a, b, 2);
+            }
+        }
+
+        private static int box_compare(T a, T b, int axis)
+        {
+            TInterval a_axis_interval = a.BoundingBox().Axis_Interval(axis);
+            TInterval b_axis_interval = b.BoundingBox().Axis_Interval(axis);
+            //return a_axis_interval.min < b_axis_interval.min;
+            return a_axis_interval.min.CompareTo(b_axis_interval.min);
+        }
+    }
+
+    class TBVH_Poly : BVHable
+    {
+        public THitPoly polygon;
+        public TAABB aabb;
+
+        public TBVH_Poly(THitPoly p, TAABB ab)
+        {
+            this.polygon = p;
+            this.aabb = ab;
+        }
+
+        public TAABB BoundingBox()
+        {
+            return aabb;
+        }
+
+        public int Index()
+        {
+            throw new System.NotImplementedException();
+        }
     }
 
     struct TRay{
@@ -68,6 +228,18 @@ public class RayTracer : MonoBehaviour
         public float min;
         public float max;
 
+        public TInterval(float min, float max)
+        {
+            this.min = min;
+            this.max = max;
+        }
+
+        public TInterval(TInterval a, TInterval b)
+        {
+            this.min = a.min <= b.min ? a.min : b.min;
+            this.max = a.max >= b.max ? a.max : b.max;
+        }
+
         public static int SizeOf()
         {
             return sizeof(float) * 2;
@@ -79,9 +251,29 @@ public class RayTracer : MonoBehaviour
         public TInterval y;
         public TInterval z;
 
+        public TAABB(TAABB box0, TAABB box1)
+        {
+            x = new TInterval(box0.x, box1.x);
+            y = new TInterval(box0.y, box1.y);
+            z = new TInterval(box0.z, box1.z);
+        }
+
+        public TAABB(Bounds orig)
+        {
+            x = new TInterval(orig.min.x, orig.max.x);
+            y = new TInterval(orig.min.y, orig.max.y);
+            z = new TInterval(orig.min.z, orig.max.z);
+        }
+
         public static int SizeOf()
         {
             return TInterval.SizeOf() * 3;
+        }
+
+        public TInterval Axis_Interval(int n) {
+            if (n == 1) return y;
+            if (n == 2) return z;
+            return x;
         }
     };
 
@@ -122,7 +314,7 @@ public class RayTracer : MonoBehaviour
         }
     };*/
 
-    struct THittObject
+    struct THittObject : BVHable
     {
         public int hittable_type;
         public int enabled;
@@ -134,12 +326,23 @@ public class RayTracer : MonoBehaviour
         public TAABB bbox;
         public Vector4 attr1;
 
+    
         public static int SizeOf()
         {
             return sizeof(int) * 5 +
                     sizeof(float) * 4 * 4 +
                    TRay.SizeOf() + TAABB.SizeOf() + 
                    sizeof(float) * 4;
+        }
+
+        public TAABB BoundingBox()
+        {
+            return bbox;
+        }
+
+        public int Index()
+        {
+            throw new System.NotImplementedException();
         }
     }
 
@@ -148,16 +351,15 @@ public class RayTracer : MonoBehaviour
         public Vector4 attr1;
         public Vector4 attr2;
         public Vector4 attr3;
-        public Vector4 attr4;
 
         public static int SizeOf()
         {
-            return sizeof(int) + sizeof(float) * 4 * 4;
+            return sizeof(int) + sizeof(float) * 4 * 3;
         }
     };
 
 
-    class SceneObject
+    class SceneObject : BVHable
     {
         public int ID;
         public int Index;
@@ -208,6 +410,7 @@ public class RayTracer : MonoBehaviour
             res.poly_num = Obj_Info.Polygons.Count;
             res.center = new TRay(Obj_Info.Center);
             res.mat = Index;
+            res.bbox = BoundingBox();
             res.rotation = Obj_Info.Rotation;
 
             return res;
@@ -231,12 +434,26 @@ public class RayTracer : MonoBehaviour
 
             return res.ToArray();
         }
+
+        public TAABB BoundingBox()
+        {
+            return new TAABB(Obj_Info.Bounds);
+        }
+
+        int BVHable.Index()
+        {
+            return Index;
+        }
     }
     int cur_id = 0;
     Dictionary<int, SceneObject> SceneObjectsMap;
     THittObject[] hittables_buffer;
     THitPoly[] hittable_poly_buffer;
     TMaterial[] materials_buffer;
+    SceneObject[] sceneObjects_arr;
+    TBVH<SceneObject> BVH;
+
+    THitPoly[] hittable_poly_bvh_process_buffer;
 
     float timer = 1.0f;
     bool should_sync_poly = false;
@@ -284,6 +501,7 @@ public class RayTracer : MonoBehaviour
         materials_buffer = new TMaterial[Initial_Buffer_Size];
         ObjectBuffer = new ComputeBuffer(Initial_Buffer_Size, THittObject.SizeOf());
         MaterialBuffer = new ComputeBuffer(Initial_Buffer_Size, TMaterial.SizeOf());
+        BvhBuffer = new ComputeBuffer((int)System.Math.Pow(2, Initial_Buffer_Size + 1) - 1, TBVH<SceneObject>.BVH_Node.SizeOf());
 
         for (int i = 0; i < Initial_Buffer_Size; i++)
         {
@@ -314,6 +532,7 @@ public class RayTracer : MonoBehaviour
         //trc_shader.SetBuffer(trc_k_id, "rand_state", RandStateBuffer);
         trc_shader.SetBuffer(trc_k_id, "Objects", ObjectBuffer);
         trc_shader.SetBuffer(trc_k_id, "Materials", MaterialBuffer);
+        trc_shader.SetBuffer(trc_k_id, "BVH", BvhBuffer);
         trc_shader.SetBuffer(trc_k_id, "debug", DebugBuffer);
 
         
@@ -371,14 +590,19 @@ public class RayTracer : MonoBehaviour
         List<THitPoly> all_polygons = new List<THitPoly>();
         all_polygons.Capacity = 1000;
 
+        sceneObjects_arr = new SceneObject[SceneObjectsMap.Count];
+
         int cur_idx = 0;
+        int i = 0;
         foreach (KeyValuePair<int, SceneObject> entry in SceneObjectsMap)
         {
             THitPoly[] polygons = entry.Value.Get_TPoly();
             all_polygons.AddRange(polygons);
             entry.Value.Poly_Offset = cur_idx;
             cur_idx += polygons.Length;
+            SceneObjectsMap[i++] = entry.Value;
         }
+
         hittable_poly_buffer = all_polygons.ToArray();
         PolyBuffer = new ComputeBuffer(Mathf.Max(1, hittable_poly_buffer.Length), THitPoly.SizeOf());
         PolyBuffer.SetData(hittable_poly_buffer);
@@ -408,6 +632,11 @@ public class RayTracer : MonoBehaviour
             hittables_buffer[entry.Value.Index] = entry.Value.get_THitt();
             materials_buffer[entry.Value.Index] = entry.Value.get_TMat();
         }
+
+        BVH = new TBVH<SceneObject>(sceneObjects_arr);
+        var nodes = BVH.GetBuffer();
+
+        BvhBuffer.SetData(nodes);
         ObjectBuffer.SetData(hittables_buffer);
         MaterialBuffer.SetData(materials_buffer);
     }

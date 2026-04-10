@@ -30,6 +30,7 @@ RWTexture2D<float4> Result;
 StructuredBuffer<hit_object> Objects;
 StructuredBuffer<hit_poly> Polygons;
 StructuredBuffer<material> Materials;
+StructuredBuffer<bvh_node> BVH;
 RWStructuredBuffer<float4> debug;
 
 bool material_scatter_none(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
@@ -272,6 +273,63 @@ bool hittable_list_hit(inout rand_state state, const ray r, interval ray_t, inou
                 closest_so_far = temp_rec.t;
                 rec = temp_rec;
             }
+        }
+    }
+
+    return hit_anything;
+}
+
+bool hittable_bvh_hit(inout rand_state state, const ray r, interval ray_t, inout hit_record rec)
+{
+    int stack[35];
+    int stack_offset = 0;
+    stack[stack_offset++] = 0; // root
+
+    bool res = false;
+    int hittable_idx = 0;
+
+    while(stack_offset > 0)
+    {
+        int idx = stack[--stack_offset];
+        bvh_node node = BVH[idx];
+
+        if (!node.enabled || !aabb_hit(node.bounds)){
+            continue;
+        }
+
+        if (node.Leaf >= 0){
+            res = true;
+            hittable_idx = node.Leaf;
+            break;
+        }
+
+        stack[stack_offset++] = 2 * idx + 2;
+        stack[stack_offset++] = 2 * idx + 1;
+
+    }
+
+    if (!res){
+        return false;
+    }
+
+    hit_record temp_rec = hit_record_new();
+    bool hit_anything = false;
+    float closest_so_far = ray_t.max;
+    hit_object h = Objects[hittable_idx];
+    if (h.enabled != 1)
+        return false;
+    if (h.hittable_type == HITTABLE_TYPE_POLY){
+        if (iter_poly_list(state, h, r, interval_new(ray_t.min, closest_so_far),temp_rec)){
+            hit_anything = true;
+            closest_so_far = temp_rec.t;
+            rec = temp_rec;
+        }
+    }
+    else{
+        if (hittable_hit(state, h, r, interval_new(ray_t.min, closest_so_far),temp_rec)){
+            hit_anything = true;
+            closest_so_far = temp_rec.t;
+            rec = temp_rec;
         }
     }
 

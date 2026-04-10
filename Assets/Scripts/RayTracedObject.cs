@@ -38,6 +38,8 @@ public class RayTracedObject : MonoBehaviour
         public Vector3 u {get; internal set;}
         public Vector3 v {get; internal set;}
 
+        public Bounds Bounds {get; internal set;}
+
         public List<Polygon> Polygons {get; internal set;}
     }
 
@@ -56,13 +58,15 @@ public class RayTracedObject : MonoBehaviour
 
     private int ID;
     Material material;
+    MeshRenderer meshRenderer;
     bool polygons_loaded = false;
 
 
     // Start is called once before the first execution of Update after the MonoBehaviour is created
     void Start()
     {
-        material = GetComponent<MeshRenderer>().material;
+        meshRenderer = GetComponent<MeshRenderer>();
+        material = meshRenderer.material;
         Object_Info = new ObjectInfo();
         Material_Info = new MaterialInfo();
         update_stats();
@@ -85,8 +89,7 @@ public class RayTracedObject : MonoBehaviour
         Color albedo = material.color;
 
         Object_Info.Object_Type = object_type;
-        
-
+        Object_Info.Bounds = meshRenderer.bounds;
 
 
         switch (object_type)

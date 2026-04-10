@@ -142,8 +142,18 @@ struct hit_poly{
     vec4 attr1;
     vec4 attr2;
     vec4 attr3;
-    vec4 attr4;
 };
+
+struct bvh_node
+{
+    int Leaf;
+    int enabled;
+    aabb bounds;
+}
+
+#define BVH_NODE_Leaf(b)     (b.Leaf)
+#define BVH_NODE_Enabled(b)  (b.enabled)
+#define BVH_NODE_BOUNDS(b)   (b.bounds)
 
 #define HIT_OBJECT_V0(o) (o.attr1.xyz)
 #define HIT_OBJECT_V1(o) (o.attr2.xyz)
