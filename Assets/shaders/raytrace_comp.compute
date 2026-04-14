@@ -8,6 +8,7 @@ int Height;
 int SamplesPerPixel;
 int MaxDepth;
 int Seed;
+int BVH_Depth;
 
 int NumObjects;
 
@@ -28,7 +29,7 @@ float FocusDist; // Variation angle of rays through each pixel
 // with cs.SetTexture
 RWTexture2D<float4> Result;
 StructuredBuffer<hit_object> Objects;
-StructuredBuffer<hit_poly> Polygons;
+RWStructuredBuffer<hit_poly> Polygons;
 StructuredBuffer<material> Materials;
 StructuredBuffer<bvh_node> BVH;
 RWStructuredBuffer<float4> debug;
@@ -281,19 +282,28 @@ bool hittable_list_hit(inout rand_state state, const ray r, interval ray_t, inou
 
 bool hittable_bvh_hit(inout rand_state state, const ray r, interval ray_t, inout hit_record rec)
 {
-    int stack[35];
+    const int STACK_SIZE = 35;
+
+    int stack[STACK_SIZE];
     int stack_offset = 0;
     stack[stack_offset++] = 0; // root
 
     bool res = false;
     int hittable_idx = 0;
 
+    int iter = 0;
     while(stack_offset > 0)
     {
+        if (stack_offset <= 0)
+            break;
+
         int idx = stack[--stack_offset];
         bvh_node node = BVH[idx];
 
-        if (!node.enabled || !aabb_hit(node.bounds)){
+        if (stack_offset >= STACK_SIZE || iter++ > 10)
+            break;
+
+        if (!node.enabled || !aabb_hit(node.bounds, r, ray_t)){
             continue;
         }
 
@@ -303,10 +313,13 @@ bool hittable_bvh_hit(inout rand_state state, const ray r, interval ray_t, inout
             break;
         }
 
-        stack[stack_offset++] = 2 * idx + 2;
-        stack[stack_offset++] = 2 * idx + 1;
+        stack[stack_offset++] = node.right; //2 * idx + 2;
+        stack[stack_offset++] = node.left; //2 * idx + 1;
 
+        iter++;
     }
+
+    debug[C_2D_to_1D(state.id, Width)] = float4(iter, stack_offset, 0, 0);
 
     if (!res){
         return false;
@@ -345,7 +358,7 @@ color ray_color(inout rand_state state, ray r, int depth)
 {
 
     color cur_color = color(1, 1, 1);
-    color background_color = color(0.0, 0.0, 0.0);
+    color background_color = color(0.01, 0.01, 0.01);
 
     /*vec3 unit_direction = unit_vector(r.dir);
     float a = 0.5 * (unit_direction.y + 1.0);
@@ -378,7 +391,7 @@ color ray_color(inout rand_state state, ray r, int depth)
     while (true)
     {
         if (depth <= 0){
-            cur_color = color(1, 1, 0);
+            cur_color = color(0, 0, 0);
             break;
         }
 
@@ -394,7 +407,6 @@ color ray_color(inout rand_state state, ray r, int depth)
                 color col_from_scatter = (cur_color * attenuation);
                 cur_color = col_from_scatter + col_from_emittion;
                 r = scattered;
-                debug[C_2D_to_1D(state.id, Width)] = float4(1, r.dir.xyz);
             }
             else{
                 cur_color *= col_from_emittion;
@@ -428,6 +440,30 @@ void write_color(int3 id, color pixel_color){
     b = interval_clamp(intensity, linear_to_gamma(b));
 
     Result[id.xy] = float4(r, g, b, 1.0);
+}
+
+[numthreads(64,1,1)]
+void TransformPolygons(uint3 id : SV_DispatchThreadID)
+{
+    hit_poly p = Polygons[id.x];
+    hit_object obj = Objects[p.hit_obj_idx];
+
+    vec3 pos = obj.center.orig;
+    float4x4 mat = obj.rotation;
+
+    vec3 v0 = HIT_OBJECT_V0(p);
+    vec3 v1 = HIT_OBJECT_V1(p);
+    vec3 v2 = HIT_OBJECT_V2(p);
+
+    v0 = mul(mat, vec4(v0, 1.0)).xyz + pos;
+    v1 = mul(mat, vec4(v1, 1.0)).xyz + pos;
+    v2 = mul(mat, vec4(v2, 1.0)).xyz + pos;
+
+    HIT_OBJECT_V0(p) = v0;
+    HIT_OBJECT_V1(p) = v1;
+    HIT_OBJECT_V2(p) = v2;
+
+    Polygons[id.x] = p;
 }
 
 [numthreads(8,8,1)]

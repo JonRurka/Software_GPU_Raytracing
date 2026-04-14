@@ -148,8 +148,10 @@ struct bvh_node
 {
     int Leaf;
     int enabled;
+    int left;
+    int right;
     aabb bounds;
-}
+};
 
 #define BVH_NODE_Leaf(b)     (b.Leaf)
 #define BVH_NODE_Enabled(b)  (b.enabled)

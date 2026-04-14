@@ -7,7 +7,7 @@ struct rand_state{
 };
 rand_state rand_state_new(int3 id){
     rand_state res;
-    res.cur_val = float3(max(1, (id.x + 1 + Seed) % Width), max(1, (id.y + 1 + Seed) % Height), 0);
+    res.cur_val = float3(max(1, uint(id.x + 1 + Seed) % uint(Width)), max(1, uint(id.y + 1 + Seed) % uint(Height)), 0);
     res.id = id;
     return res;
 }

@@ -15,6 +15,7 @@ public class RayTracer : MonoBehaviour
     public int SamplesPerPixel;
     public int MaxDepth;
     public int Initial_Buffer_Size = 10;
+    public bool real_time;
     public bool debug_print = false;
     private int cur_buffer_size;
 
@@ -54,11 +55,13 @@ public class RayTracer : MonoBehaviour
         {
             public int Leaf;
             public int enabled;
+            public int left;
+            public int right;
             public TAABB aabb;
 
             public static int SizeOf()
             {
-                return sizeof(int) * 2 + TAABB.SizeOf();
+                return sizeof(int) * 4 + TAABB.SizeOf();
             }
         }
 
@@ -68,11 +71,16 @@ public class RayTracer : MonoBehaviour
         public T Leaf;
         public int Size;
 
-        public TBVH(T[] objects) : this(objects, 0, objects.Length)
+        private int parent_idx = -1;
+        private int side = -1;
+
+        public static int Depth = 0;
+
+        public TBVH(T[] objects) : this(objects, 0, objects.Length, 0)
         {
         }
 
-        public TBVH(T[] objects, int start, int end)
+        public TBVH(T[] objects, int start, int end, int depth)
         {
             Leaf = default(T);
 
@@ -83,45 +91,51 @@ public class RayTracer : MonoBehaviour
                 : new box_z_compare();
 
             int object_span = end - start;
-            //Size = object_span;
+            Size = object_span;
             
             if (object_span == 1)
             {
                 Left = Right = null;
                 Leaf = objects[start];
+                Bbox = Leaf.BoundingBox();
             }
             else if (object_span == 2)
             {
-                Left = new TBVH<T>(objects[start]);
-                Right = new TBVH<T>(objects[start + 1]);
+                Left = new TBVH<T>(objects[start], ++depth);
+                Right = new TBVH<T>(objects[start + 1], ++depth);
+                Bbox = new TAABB(Left.Bbox, Right.Bbox);
             }
             else
             {
-                System.Array.Sort(objects, start, end, comparator);
+                System.Array.Sort(objects, start, object_span, comparator);
                 int mid = start + object_span / 2;
-                Left = new TBVH<T>(objects, start, mid);
-                Right = new TBVH<T>(objects, mid, end);
+                Left = new TBVH<T>(objects, start, mid, ++depth);
+                Right = new TBVH<T>(objects, mid, end, ++depth);
+                Bbox = new TAABB(Left.Bbox, Right.Bbox);
             }
 
-            Bbox = new TAABB(Left.Bbox, Right.Bbox);
+            
         }
 
-        public TBVH(T obj)
+        public TBVH(T obj, int depth)
         {
             Left = Right = null;
             Leaf = obj;
+            Depth = Mathf.Max(Depth, depth);
+            Size = 1;
         }
 
         public BVH_Node[] GetBuffer()
         {
-            List<BVH_Node> res = new List<BVH_Node>();
-            res.Capacity = (int)System.Math.Pow(2, Size + 1) - 1;
-            //BVH_Node[] res = new BVH_Node[(int)System.Math.Pow(2, Size + 1) - 1];
+            Debug.LogFormat("Get Buffer...");
+
+            //List<BVH_Node> res = new List<BVH_Node>();
+            //res.Capacity = (int)System.Math.Pow(2, Size + 1) - 1;
+            BVH_Node[] res = new BVH_Node[(int)System.Math.Pow(2, Size + 1) - 1];
 
             Queue<TBVH<T>> queue = new Queue<TBVH<T>>();
-            queue.Append(this);
+            queue.Enqueue(this);
 
-            int level = 0;
             int cur = 0;
             while(queue.Count > 0)
             {
@@ -133,15 +147,74 @@ public class RayTracer : MonoBehaviour
                     bvh_node.enabled = 1;
                     bvh_node.aabb = node.Bbox;
                     bvh_node.Leaf = (node.Leaf != null) ? (node.Leaf.Index()) : -1;
+                    //res.Add(bvh_node);
+                    int n_idx = cur;
+                    //Debug.LogFormat("Add node {0} out of {1}", n_idx, res.Length - 1);
+                    
+                    res[cur++] = bvh_node;
+                    
+
+                    switch (node.side)
+                    {
+                        case 1:
+                        res[node.parent_idx].left = n_idx;
+                        break;
+
+                        case 2:
+                        res[node.parent_idx].right = n_idx;
+                        break;
+                    }
+
+
+                    if (node.Left != null) {
+                        node.Left.parent_idx = n_idx;
+                        node.Left.side = 1;
+                        queue.Enqueue(node.Left);
+                    }
+                    if (node.Right != null) {
+                        node.Right.parent_idx = n_idx;
+                        node.Right.side = 2;
+                        queue.Enqueue(node.Right);
+                    }
+                }
+            }
+
+            return res;
+            //return res.ToArray();
+
+            /*List<BVH_Node> res = new List<BVH_Node>();
+            res.Capacity = (int)System.Math.Pow(2, Size + 1) - 1;
+            //BVH_Node[] res = new BVH_Node[(int)System.Math.Pow(2, Size + 1) - 1];
+
+            Queue<TBVH<T>> queue = new Queue<TBVH<T>>();
+            queue.Enqueue(this);
+
+            int level = 0;
+            int cur = 0;
+            Debug.LogFormat("Count: {0}", queue.Count);
+            while(queue.Count > 0)
+            {
+                int exp_ent = (int)System.Math.Pow(2, level);
+                int size = queue.Count;
+                Debug.LogFormat("{0} == {1}", exp_ent, size);
+                for (int i = 0; i < size; i++)
+                {
+                    TBVH<T> node = queue.Dequeue();
+                    BVH_Node bvh_node = default;
+                    bvh_node.enabled = 1;
+                    bvh_node.aabb = node.Bbox;
+                    bvh_node.Leaf = (node.Leaf != null) ? (node.Leaf.Index()) : -1;
                     res.Add(bvh_node);
 
-                    if (node.Left != null) queue.Append(node.Left);
-                    if (node.Right != null) queue.Append(node.Right);
+                    if (node.Left != null) queue.Enqueue(node.Left);
+                    if (node.Right != null) queue.Enqueue(node.Right);
                 }
                 level++;
             }
-            return res.ToArray();
+            Debug.LogFormat("Get Buffer: {0}", res.Count);
+            return res.ToArray();*/
             //return res;
+
         }
 
         private class box_x_compare: IComparer<T>
@@ -572,7 +645,7 @@ public class RayTracer : MonoBehaviour
         }
 
         timer -= Time.deltaTime;
-        if (timer <= 0 && !did_shoot){
+        if ((timer <= 0 && !did_shoot) || real_time){
             Debug.LogFormat("Start render");
             System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();  
 
@@ -600,7 +673,7 @@ public class RayTracer : MonoBehaviour
             all_polygons.AddRange(polygons);
             entry.Value.Poly_Offset = cur_idx;
             cur_idx += polygons.Length;
-            SceneObjectsMap[i++] = entry.Value;
+            sceneObjects_arr[i++] = entry.Value;
         }
 
         hittable_poly_buffer = all_polygons.ToArray();
@@ -633,8 +706,16 @@ public class RayTracer : MonoBehaviour
             materials_buffer[entry.Value.Index] = entry.Value.get_TMat();
         }
 
+        System.Diagnostics.Stopwatch w = new System.Diagnostics.Stopwatch();
+        w.Start();
         BVH = new TBVH<SceneObject>(sceneObjects_arr);
+        w.Stop();
+        Debug.LogFormat("Create BVH ({0}): {1} ms", TBVH<SceneObject>.Depth, w.Elapsed.TotalMilliseconds);
+
+        w.Restart();
         var nodes = BVH.GetBuffer();
+        w.Stop();
+        Debug.LogFormat("Get BVH Buffer: {0} ms", w.Elapsed.TotalMilliseconds);
 
         BvhBuffer.SetData(nodes);
         ObjectBuffer.SetData(hittables_buffer);
@@ -654,7 +735,9 @@ public class RayTracer : MonoBehaviour
         trc_shader.SetInt("NumObjects", cur_buffer_size);
 
         trc_shader.Dispatch(trc_k_id, renderTexturel.width / 8, renderTexturel.height / 8, 1);
-
+        Vector4[] debug_vals_1 = new Vector4[1];
+            DebugBuffer.GetData(debug_vals_1, 0, 0, 1);
+        
         if (debug_print){
             int total_size = renderTexturel.width * renderTexturel.height;
             Vector4[] debug_vals = new Vector4[total_size];
@@ -662,6 +745,9 @@ public class RayTracer : MonoBehaviour
 
             for(uint i = 0; i < total_size; i++)
             {
+                if (i % 100 != 0)
+                    continue;
+
                 Vector2Int ipos = C_1D_to_2D(i, (uint)renderTexturel.width);
                 if (debug_vals[i].x >= 1)
                     Debug.LogFormat("({0}, {1}): {2}", ipos.x, ipos.y, debug_vals[i].ToString());

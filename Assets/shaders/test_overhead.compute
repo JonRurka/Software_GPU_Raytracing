@@ -1,0 +1,75 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CombinedLoops
+#pragma kernel SeperateLoops
+
+int Width;
+int Height;
+int Seed;
+int NumLoops;
+int loopIter;
+
+uint C_2D_to_1D(int3 id, uint width) {
+    return uint(id.y * width + id.x);
+}
+
+int2 C_1D_to_2D(uint i, uint width) {
+    int y = int(i / width);
+    int x = int(i % width);
+
+    return int2(x, y);
+}
+
+
+struct rand_state{
+    float3 cur_val;
+    int3 id;
+};
+rand_state rand_state_new(int3 id){
+    rand_state res;
+    res.cur_val = float3(max(1, uint(id.x + 1 + Seed) % uint(Width)), max(1, uint(id.y + 1 + Seed) % uint(Height)), 0);
+    res.id = id;
+    return res;
+}
+
+//RWStructuredBuffer<float> rand_state;
+inline float random_double(inout rand_state state)
+{
+    float cur_val = frac(sin(dot(float2(state.cur_val.xy), float2(12.9898, 78.233))) * 43758.5453123);
+    state.cur_val += float3(max(1, state.id.x + 1 + cur_val), max(1, state.id.y + 1 + cur_val), 0);
+    state.cur_val = float3(fmod(state.cur_val.x, Width), fmod(state.cur_val.y, Height), 0);
+    return cur_val;
+}
+
+
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWStructuredBuffer<float> Data;
+
+void do_loop(inout rand_state state){
+    float sum = Data[C_2D_to_1D(state.id, Width)];
+    for (int i = 0; i < loopIter; i++)
+    {
+        sum += random_double(state);
+    }
+    Data[C_2D_to_1D(state.id, Width)] = sum / loopIter;
+}
+
+[numthreads(8,8,1)]
+void CombinedLoops (uint3 id : SV_DispatchThreadID)
+{
+    rand_state state = rand_state_new(id);
+
+    for (int i = 0; i < NumLoops; i++)
+    {
+        do_loop(state);
+    }
+}
+
+[numthreads(8,8,1)]
+void SeperateLoops (uint3 id : SV_DispatchThreadID)
+{
+    rand_state state = rand_state_new(id);
+    do_loop(state);
+}
+
