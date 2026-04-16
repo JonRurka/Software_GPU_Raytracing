@@ -1,7 +1,9 @@
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Linq.Expressions;
 using Palmmedia.ReportGenerator.Core;
+using Unity.VisualScripting.FullSerializer;
 using UnityEngine;
 
 public class RayTracer : MonoBehaviour
@@ -13,6 +15,7 @@ public class RayTracer : MonoBehaviour
     public RenderTexture renderTexturel;
 
     public int SamplesPerPixel;
+    public int SamplesPerRun;
     public int MaxDepth;
     public int Initial_Buffer_Size = 10;
     public bool real_time;
@@ -21,13 +24,20 @@ public class RayTracer : MonoBehaviour
 
     public Texture2D test_tex;
 
+    private int trnfm_k_id = 0;
     private int trc_k_id = 0;
+    private int init_k_id = 0;
+    private int traceit_k_id = 0;
+    private int finlz_k_id = 0;
     private ComputeBuffer RandStateBuffer;
     private ComputeBuffer ObjectBuffer;
     private ComputeBuffer PolyBuffer;
+    private ComputeBuffer PolyTransBuffer;
     private ComputeBuffer MaterialBuffer;
     private ComputeBuffer DebugBuffer;
     private ComputeBuffer BvhBuffer;
+    private ComputeBuffer PixelMeta;
+    private ComputeBuffer ColorAccume;
 
     public enum MaterialType : int
     {
@@ -68,7 +78,8 @@ public class RayTracer : MonoBehaviour
         public TBVH<T> Left;
         public TBVH<T> Right;
         public TAABB Bbox;
-        public T Leaf;
+        public T LeafVal;
+        public bool IsLeaf;
         public int Size;
 
         private int parent_idx = -1;
@@ -82,7 +93,8 @@ public class RayTracer : MonoBehaviour
 
         public TBVH(T[] objects, int start, int end, int depth)
         {
-            Leaf = default(T);
+            LeafVal = default(T);
+            IsLeaf = false;
 
             int axis = Random.Range(0, 2);
             IComparer<T> comparator = 
@@ -96,8 +108,10 @@ public class RayTracer : MonoBehaviour
             if (object_span == 1)
             {
                 Left = Right = null;
-                Leaf = objects[start];
-                Bbox = Leaf.BoundingBox();
+                LeafVal = objects[start];
+                IsLeaf = true;
+                Depth = Mathf.Max(Depth, ++depth);
+                Bbox = LeafVal.BoundingBox();
             }
             else if (object_span == 2)
             {
@@ -120,8 +134,10 @@ public class RayTracer : MonoBehaviour
         public TBVH(T obj, int depth)
         {
             Left = Right = null;
-            Leaf = obj;
+            LeafVal = obj;
+            IsLeaf = true;
             Depth = Mathf.Max(Depth, depth);
+            Bbox = obj.BoundingBox();
             Size = 1;
         }
 
@@ -129,9 +145,9 @@ public class RayTracer : MonoBehaviour
         {
             Debug.LogFormat("Get Buffer...");
 
-            //List<BVH_Node> res = new List<BVH_Node>();
+            List<BVH_Node> res = new List<BVH_Node>();
             //res.Capacity = (int)System.Math.Pow(2, Size + 1) - 1;
-            BVH_Node[] res = new BVH_Node[(int)System.Math.Pow(2, Size + 1) - 1];
+            //BVH_Node[] res = new BVH_Node[(int)System.Math.Pow(2, Size + 1) - 1];
 
             Queue<TBVH<T>> queue = new Queue<TBVH<T>>();
             queue.Enqueue(this);
@@ -146,22 +162,29 @@ public class RayTracer : MonoBehaviour
                     BVH_Node bvh_node = default;
                     bvh_node.enabled = 1;
                     bvh_node.aabb = node.Bbox;
-                    bvh_node.Leaf = (node.Leaf != null) ? (node.Leaf.Index()) : -1;
-                    //res.Add(bvh_node);
-                    int n_idx = cur;
+                    bvh_node.Leaf = (node.IsLeaf) ? (node.LeafVal.Index()) : -1;
+                    
+                    int n_idx = res.Count;//cur;
+
                     //Debug.LogFormat("Add node {0} out of {1}", n_idx, res.Length - 1);
                     
-                    res[cur++] = bvh_node;
+                    //res[cur++] = bvh_node;
+                    res.Add(bvh_node);
                     
 
+                    BVH_Node p_node;
                     switch (node.side)
                     {
                         case 1:
-                        res[node.parent_idx].left = n_idx;
+                        p_node = res[node.parent_idx];
+                        p_node.left = n_idx;
+                        res[node.parent_idx] = p_node;
                         break;
 
                         case 2:
-                        res[node.parent_idx].right = n_idx;
+                        p_node = res[node.parent_idx];
+                        p_node.right = n_idx;
+                        res[node.parent_idx] = p_node;
                         break;
                     }
 
@@ -179,8 +202,8 @@ public class RayTracer : MonoBehaviour
                 }
             }
 
-            return res;
-            //return res.ToArray();
+            //return res;
+            return res.ToArray();
 
             /*List<BVH_Node> res = new List<BVH_Node>();
             res.Capacity = (int)System.Math.Pow(2, Size + 1) - 1;
@@ -273,12 +296,36 @@ public class RayTracer : MonoBehaviour
     }
 
     struct TRay{
-        public Vector3 orig;
-        public Vector3 dir;
-        public float tm;
+        //public Vector3 orig;
+        //public Vector3 dir;
+        //public float tm;
+
+        private Vector4 fattr1;
+        private Vector4 fattr2;
+
+        public Vector3 orig
+        {
+            get {return fattr1;}
+            set {fattr1 = new Vector4(value.x, value.y, value.z, fattr1.w);}
+        }
+
+        public Vector3 dir
+        {
+            get {return fattr2;}
+            set {fattr2 = new Vector4(value.x, value.y, value.z, 0);}
+        }
+
+        public float tm
+        {
+            get {return fattr1.w;}
+            set {fattr1.w = value;}
+        }
 
         public TRay(Vector3 static_center)
         {
+            fattr1 = new Vector4();
+            fattr2 = new Vector4();
+
             orig = static_center;
             dir = Vector3.zero;
             tm = 0;
@@ -286,6 +333,9 @@ public class RayTracer : MonoBehaviour
 
         public TRay(Vector3 center1, Vector3 center2)
         {
+            fattr1 = new Vector4();
+            fattr2 = new Vector4();
+
             orig = center1;
             dir = (center2 - center1);
             tm = 0;
@@ -293,7 +343,7 @@ public class RayTracer : MonoBehaviour
 
         public static int SizeOf()
         {
-            return sizeof(float) * 3 + sizeof(float) * 3 + sizeof(float);
+            return sizeof(float) * 4 * 2;
         }
     };
 
@@ -347,6 +397,16 @@ public class RayTracer : MonoBehaviour
             if (n == 1) return y;
             if (n == 2) return z;
             return x;
+        }
+
+        public Vector3 Max()
+        {
+            return new Vector3(x.max, y.max, z.max);
+        }
+
+        public Vector3 Min()
+        {
+            return new Vector3(x.min, y.min, z.min);
         }
     };
 
@@ -419,7 +479,7 @@ public class RayTracer : MonoBehaviour
         }
     }
 
-    struct THitPoly{
+    struct THitPoly : BVHable{
         public int hit_obj_idx;
         public Vector4 attr1;
         public Vector4 attr2;
@@ -428,6 +488,21 @@ public class RayTracer : MonoBehaviour
         public static int SizeOf()
         {
             return sizeof(int) + sizeof(float) * 4 * 3;
+        }
+
+        public TAABB BoundingBox()
+        {
+            Bounds bounds = new Bounds(attr1, Vector3.zero);
+            bounds.Encapsulate(attr2);
+            bounds.Encapsulate(attr3);
+            bounds.Expand(0.001f);
+            //Debug.LogFormat("make BB: {0}", bounds.size);
+            return new TAABB(bounds);
+        }
+
+        public int Index()
+        {
+            return Mathf.RoundToInt(attr1.w);
         }
     };
 
@@ -524,7 +599,8 @@ public class RayTracer : MonoBehaviour
     THitPoly[] hittable_poly_buffer;
     TMaterial[] materials_buffer;
     SceneObject[] sceneObjects_arr;
-    TBVH<SceneObject> BVH;
+    //TBVH<SceneObject> BVH;
+    TBVH<THitPoly> BVH;
 
     THitPoly[] hittable_poly_bvh_process_buffer;
 
@@ -567,6 +643,7 @@ public class RayTracer : MonoBehaviour
     void Awake()
     {
         Instance = this;
+        int total_size = renderTexturel.width * renderTexturel.height;
 
         cur_buffer_size = Initial_Buffer_Size;
         SceneObjectsMap = new Dictionary<int, SceneObject>();
@@ -574,7 +651,9 @@ public class RayTracer : MonoBehaviour
         materials_buffer = new TMaterial[Initial_Buffer_Size];
         ObjectBuffer = new ComputeBuffer(Initial_Buffer_Size, THittObject.SizeOf());
         MaterialBuffer = new ComputeBuffer(Initial_Buffer_Size, TMaterial.SizeOf());
-        BvhBuffer = new ComputeBuffer((int)System.Math.Pow(2, Initial_Buffer_Size + 1) - 1, TBVH<SceneObject>.BVH_Node.SizeOf());
+        //BvhBuffer = new ComputeBuffer((int)System.Math.Pow(2, Initial_Buffer_Size + 1) - 1, TBVH<SceneObject>.BVH_Node.SizeOf());
+        PixelMeta = new ComputeBuffer(total_size, sizeof(float) * 4 * 5);
+        ColorAccume = new ComputeBuffer(total_size, sizeof(float) * 3);
 
         for (int i = 0; i < Initial_Buffer_Size; i++)
         {
@@ -584,11 +663,17 @@ public class RayTracer : MonoBehaviour
 
         int seed = 0;// Random.Range(System.Int32.MinValue, System.Int32.MaxValue);
 
-        trc_k_id = trc_shader.FindKernel("CSMain");
-        trc_shader.SetTexture(trc_k_id, "Result", renderTexturel);
+        trnfm_k_id = trc_shader.FindKernel("TransformPolygons");
+        //trc_k_id = trc_shader.FindKernel("CSMain");
+        init_k_id = trc_shader.FindKernel("InitCamera");
+        traceit_k_id = trc_shader.FindKernel("TraceIteration");
+        finlz_k_id = trc_shader.FindKernel("Finalize");
+
+        
         trc_shader.SetInt("Width", renderTexturel.width);
         trc_shader.SetInt("Height", renderTexturel.height);
         trc_shader.SetInt("SamplesPerPixel", SamplesPerPixel);
+        trc_shader.SetInt("SamplesPerRun", SamplesPerRun);
         trc_shader.SetInt("MaxDepth", MaxDepth);
         trc_shader.SetInt("Seed", seed);
 
@@ -596,19 +681,35 @@ public class RayTracer : MonoBehaviour
         trc_shader.SetInt("SampleTexWidth", test_tex.width);
         trc_shader.SetInt("SampleTexHeight", test_tex.height);
 
-        int total_size = renderTexturel.width * renderTexturel.height;
+        
 
         //RandStateBuffer = new ComputeBuffer(total_size, sizeof(float));
         
         DebugBuffer = new ComputeBuffer(total_size, sizeof(float) * 4);
 
         //trc_shader.SetBuffer(trc_k_id, "rand_state", RandStateBuffer);
-        trc_shader.SetBuffer(trc_k_id, "Objects", ObjectBuffer);
-        trc_shader.SetBuffer(trc_k_id, "Materials", MaterialBuffer);
-        trc_shader.SetBuffer(trc_k_id, "BVH", BvhBuffer);
-        trc_shader.SetBuffer(trc_k_id, "debug", DebugBuffer);
+        
+        trc_shader.SetBuffer(trnfm_k_id, "Objects", ObjectBuffer);
+
+        //trc_shader.SetBuffer(trc_k_id, "Materials", MaterialBuffer);
+        //trc_shader.SetBuffer(trc_k_id, "BVH", BvhBuffer);
+        //trc_shader.SetBuffer(trc_k_id, "debug", DebugBuffer);
+        //trc_shader.SetTexture(trc_k_id, "Result", renderTexturel);
 
         
+        trc_shader.SetBuffer(init_k_id, "PixelMeta", PixelMeta);
+        trc_shader.SetBuffer(init_k_id, "ColorAccume", ColorAccume);
+
+        trc_shader.SetBuffer(traceit_k_id, "Objects", ObjectBuffer);
+        trc_shader.SetBuffer(traceit_k_id, "PixelMeta", PixelMeta);
+        trc_shader.SetBuffer(traceit_k_id, "Materials", MaterialBuffer);
+        trc_shader.SetBuffer(traceit_k_id, "ColorAccume", ColorAccume);
+        
+        trc_shader.SetBuffer(finlz_k_id, "ColorAccume", ColorAccume);
+        trc_shader.SetTexture(finlz_k_id, "Result", renderTexturel);
+        
+        
+
         
 
         /*Debug.LogFormat("Start render");
@@ -676,10 +777,16 @@ public class RayTracer : MonoBehaviour
             sceneObjects_arr[i++] = entry.Value;
         }
 
+        
         hittable_poly_buffer = all_polygons.ToArray();
+        Debug.LogFormat("hittable_poly_buffer: {0}", hittable_poly_buffer.Length);
         PolyBuffer = new ComputeBuffer(Mathf.Max(1, hittable_poly_buffer.Length), THitPoly.SizeOf());
+        PolyTransBuffer = new ComputeBuffer(Mathf.Max(1, hittable_poly_buffer.Length), THitPoly.SizeOf());
         PolyBuffer.SetData(hittable_poly_buffer);
-        trc_shader.SetBuffer(trc_k_id, "Polygons", PolyBuffer);
+        trc_shader.SetBuffer(trnfm_k_id, "Polygons", PolyBuffer);
+        trc_shader.SetBuffer(trnfm_k_id, "TransformedPolygons", PolyTransBuffer);
+        //trc_shader.SetBuffer(trc_k_id, "TransformedPolygons", PolyTransBuffer);
+        trc_shader.SetBuffer(traceit_k_id, "TransformedPolygons", PolyTransBuffer);
     }
 
     
@@ -706,7 +813,14 @@ public class RayTracer : MonoBehaviour
             materials_buffer[entry.Value.Index] = entry.Value.get_TMat();
         }
 
-        System.Diagnostics.Stopwatch w = new System.Diagnostics.Stopwatch();
+        //sync_bvh();
+        ObjectBuffer.SetData(hittables_buffer);
+        MaterialBuffer.SetData(materials_buffer);
+    }
+
+    void sync_bvh()
+    {
+        /*System.Diagnostics.Stopwatch w = new System.Diagnostics.Stopwatch();
         w.Start();
         BVH = new TBVH<SceneObject>(sceneObjects_arr);
         w.Stop();
@@ -717,13 +831,63 @@ public class RayTracer : MonoBehaviour
         w.Stop();
         Debug.LogFormat("Get BVH Buffer: {0} ms", w.Elapsed.TotalMilliseconds);
 
+        BvhBuffer.SetData(nodes);*/
+        //Debug.LogFormat("--------sync_bvh start---------");
+
+        System.Diagnostics.Stopwatch w = new System.Diagnostics.Stopwatch();
+        w.Start();
+
+        THitPoly[] h_poly = new THitPoly[hittable_poly_buffer.Length];
+        PolyTransBuffer.GetData(h_poly);
+        //w.Stop();
+        //Debug.LogFormat("Get Polygons {0}: {1} ms", h_poly.Length, w.Elapsed.TotalMilliseconds);
+
+        //w.Restart();
+        BVH = new TBVH<THitPoly>(h_poly);
+        //w.Stop();
+        //Debug.LogFormat("Create BVH (Depth: {0}): {1} ms", TBVH<SceneObject>.Depth, w.Elapsed.TotalMilliseconds);
+
+
+        //w.Restart();
+        var nodes = BVH.GetBuffer();
+        //w.Stop();
+        //Debug.LogFormat("Get BVH Buffer: {0} ms", w.Elapsed.TotalMilliseconds);
+
+        //w.Restart();
+        BvhBuffer = new ComputeBuffer(nodes.Length, TBVH<THitPoly>.BVH_Node.SizeOf());
         BvhBuffer.SetData(nodes);
-        ObjectBuffer.SetData(hittables_buffer);
-        MaterialBuffer.SetData(materials_buffer);
+        //trc_shader.SetBuffer(trc_k_id, "BVH", BvhBuffer);
+        trc_shader.SetBuffer(traceit_k_id, "BVH", BvhBuffer);
+
+        w.Stop();
+        //Debug.LogFormat("Set BVH Compute Buffer {0}: {1} ms", nodes.Length, w.Elapsed.TotalMilliseconds);
+        //Debug.LogFormat("--------sync_bvh end ()---------");
+        Debug.LogFormat("Process BVH ({0}): {1} ms", nodes.Length, w.Elapsed.TotalMilliseconds);
+
+        /*for (int i = 0; i < nodes.Length; i++)
+        {
+            //Debug.LogFormat("{0}: {1}", i, nodes[i].Leaf);
+
+            if (nodes[i].enabled == 0)
+                continue;
+
+
+            Vector3 mi = nodes[i].aabb.Min();
+            Vector3 ma = nodes[i].aabb.Max();
+            Bounds b = new Bounds(mi, Vector3.zero);
+            b.Encapsulate(ma);
+            Debug.LogFormat("Draw Node: {0}, {1} = {2}", mi, ma, b.size);
+            DrawBounds(b, Color.red);
+        }*/
     }
 
     void render()
     {
+        if (hittable_poly_buffer.Length <= 0){
+            Debug.LogFormat("No Polygons.");
+            return;
+        }
+
         int seed = Random.Range(System.Int32.MinValue, System.Int32.MaxValue);
         //trc_shader.SetInt("Seed", seed);
         trc_shader.SetFloat("VFOV", 90);
@@ -733,11 +897,31 @@ public class RayTracer : MonoBehaviour
         trc_shader.SetFloat("DefocusAngle", 0.0f);
         trc_shader.SetFloat("FocusDist", 5);
         trc_shader.SetInt("NumObjects", cur_buffer_size);
+        trc_shader.SetInt("NumPoly", hittable_poly_buffer.Length);
+        trc_shader.SetInt("SamplesPerPixel", SamplesPerPixel);
+        //trc_shader.SetInt("NumObjects", cur_buffer_size);
 
-        trc_shader.Dispatch(trc_k_id, renderTexturel.width / 8, renderTexturel.height / 8, 1);
-        Vector4[] debug_vals_1 = new Vector4[1];
-            DebugBuffer.GetData(debug_vals_1, 0, 0, 1);
+
+        trc_shader.Dispatch(trnfm_k_id, Mathf.Max(1, hittable_poly_buffer.Length / 64), 1, 1);
+
+        sync_bvh();
+
+        //trc_shader.Dispatch(trc_k_id, renderTexturel.width / 8, renderTexturel.height / 8, 1);
         
+        trc_shader.Dispatch(init_k_id, renderTexturel.width / 8, renderTexturel.height / 8, 1);
+        for (int i = 0; i < (SamplesPerPixel / SamplesPerRun); i++)
+        {
+            Debug.LogFormat("Executing Batch...");
+            trc_shader.SetInt("Seed", i);
+            trc_shader.Dispatch(traceit_k_id, renderTexturel.width / 8, renderTexturel.height / 8, Mathf.Max(1, SamplesPerRun / 10));
+        }
+
+        trc_shader.Dispatch(finlz_k_id, renderTexturel.width / 8, renderTexturel.height / 8, 1);
+        Vector3[] debug_vals_1 = new Vector3[1];
+        ColorAccume.GetData(debug_vals_1, 0, 0, 1);
+
+        
+        int max_stack = 0;
         if (debug_print){
             int total_size = renderTexturel.width * renderTexturel.height;
             Vector4[] debug_vals = new Vector4[total_size];
@@ -745,13 +929,15 @@ public class RayTracer : MonoBehaviour
 
             for(uint i = 0; i < total_size; i++)
             {
-                if (i % 100 != 0)
-                    continue;
+                //if (i % 100 != 0)
+                //    continue;
 
                 Vector2Int ipos = C_1D_to_2D(i, (uint)renderTexturel.width);
+                //max_stack = System.Math.Max(max_stack, (int)debug_vals[i].y);
                 if (debug_vals[i].x >= 1)
-                    Debug.LogFormat("({0}, {1}): {2}", ipos.x, ipos.y, debug_vals[i].ToString());
+                    Debug.LogFormat("Result ({0}, {1}): {2}", ipos.x, ipos.y, debug_vals[i].ToString());
             }
+            //Debug.LogFormat("Stack reached: {0}", max_stack);
         }
     }
 
@@ -764,5 +950,41 @@ public class RayTracer : MonoBehaviour
         int x = (int)(i % width);
 
         return new Vector2Int(x, y);
+    }
+
+    void DrawBounds(Bounds b, Color color)
+    {
+        Vector3 min = b.min;
+        Vector3 max = b.max;
+
+        Vector3[] corners = new Vector3[8];
+        // Bottom
+        corners[0] = new Vector3(min.x, min.y, min.z);
+        corners[1] = new Vector3(max.x, min.y, min.z);
+        corners[2] = new Vector3(max.x, min.y, max.z);
+        corners[3] = new Vector3(min.x, min.y, max.z);
+        // Top
+        corners[4] = new Vector3(min.x, max.y, min.z);
+        corners[5] = new Vector3(max.x, max.y, min.z);
+        corners[6] = new Vector3(max.x, max.y, max.z);
+        corners[7] = new Vector3(min.x, max.y, max.z);
+
+        // Bottom rectangle
+        Debug.DrawLine(corners[0], corners[1], color);
+        Debug.DrawLine(corners[1], corners[2], color);
+        Debug.DrawLine(corners[2], corners[3], color);
+        Debug.DrawLine(corners[3], corners[0], color);
+
+        // Top rectangle
+        Debug.DrawLine(corners[4], corners[5], color);
+        Debug.DrawLine(corners[5], corners[6], color);
+        Debug.DrawLine(corners[6], corners[7], color);
+        Debug.DrawLine(corners[7], corners[4], color);
+
+        // Vertical edges
+        Debug.DrawLine(corners[0], corners[4], color);
+        Debug.DrawLine(corners[1], corners[5], color);
+        Debug.DrawLine(corners[2], corners[6], color);
+        Debug.DrawLine(corners[3], corners[7], color);
     }
 }

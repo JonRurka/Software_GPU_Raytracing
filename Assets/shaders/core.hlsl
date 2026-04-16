@@ -71,11 +71,19 @@ vec3 vec3_refract(const vec3 uv, const vec3 n, float etai_over_etat) {
     return r_out_perp + r_out_parallel;
 }
 
-struct ray{
+/*struct ray{
     point3 orig;
     vec3 dir;
     float tm;
+};*/
+struct ray{
+    float4 fattr1;
+    float4 fattr2;
 };
+
+#define ray_orig(r)     (r.fattr1.xyz)
+#define ray_dir(r)      (r.fattr2.xyz)
+#define ray_tm(r)       (r.fattr1.w)
 
 struct interval{
     float min;
@@ -96,14 +104,32 @@ struct material{
     float refraction_index;
 };
 
-struct hit_record{
+/*struct hit_record{
     point3 position;
     vec3 normal;
     mat_ID mat;
     float t;
     float2 uv;
     bool front_face;
+};*/
+
+struct hit_record{
+    float4 fattr1; // position, t
+    float4 fattr2; // uv, mat, front_face
+    float4 fattr3; // normal
+    //int4 iattr1; // mat, front_face
 };
+
+#define hit_record_position(h)  (h.fattr1.xyz)
+#define hit_record_t(h)         (h.fattr1.w)
+#define hit_record_uv(h)        (h.fattr2.xy)
+#define hit_record_normal(h)    (h.fattr3.xyz)
+
+#define hit_record_mat_get(h)       (int(h.fattr2.z))
+#define hit_record_mat_set(h, v)    (h.fattr2.z = float(v))
+
+#define hit_record_front_face_get(h)    (int(h.fattr2.w) == 1 ? true : false) 
+#define hit_record_front_face_set(h, v) (h.fattr2.w = float(v == true ? 1 : 0)) 
 
 struct hittable{
     hit_type hittable_type;
@@ -153,6 +179,14 @@ struct bvh_node
     aabb bounds;
 };
 
+struct pixel_orientation{
+    vec4 pixel00_loc; 
+    vec4 pixel_delta_u; 
+    vec4 pixel_delta_v; 
+    vec4 defocus_disk_u; 
+    vec4 defocus_disk_v;
+};
+
 #define BVH_NODE_Leaf(b)     (b.Leaf)
 #define BVH_NODE_Enabled(b)  (b.enabled)
 #define BVH_NODE_BOUNDS(b)   (b.bounds)
@@ -165,9 +199,14 @@ typedef hittable sphere;
 
 ray ray_new(point3 origin, vec3 direction, float t){
     ray r;
-    r.orig = origin;
-    r.dir = direction;
-    r.tm = t;
+    r.fattr1 = float4(0,0,0,0);
+    r.fattr2 = float4(0,0,0,0);
+    ray_orig(r) = origin;
+    ray_dir(r) = direction;
+    ray_tm(r) = t;
+    //r.orig = origin;
+    //r.dir = direction;
+    //r.tm = t;
     return r;
 }
 
@@ -180,7 +219,7 @@ ray ray_new(){
 }
 
 point3 ray_at(const ray r, float t){
-    return r.orig + t*r.dir;
+    return ray_orig(r) + t * ray_dir(r);
 }
 
 interval interval_new(float min, float max)
@@ -243,8 +282,8 @@ aabb aabb_new(interval x, interval y, interval z)
 
 bool aabb_hit(aabb b, const ray r, interval ray_t)
 {
-    const point3 ray_orig = r.orig;
-    const vec3 ray_dir = r.dir;
+    const point3 ray_orig = ray_orig(r);
+    const vec3 ray_dir = ray_dir(r);
 
     for (int axis = 0; axis < 3; axis++) {
         const interval ax = aabb_axis_interval(b, axis);
@@ -270,12 +309,23 @@ bool aabb_hit(aabb b, const ray r, interval ray_t)
 hit_record hit_record_new()
 {
     hit_record rec;
-    rec.position = point3(0, 0, 0);
-    rec.normal = vec3(0, 1, 0);
-    rec.mat = 0;
-    rec.t = 0;
-    rec.uv = float2(0,0);
-    rec.front_face = true;
+    rec.fattr1 = float4(0,0,0,0);
+    rec.fattr2 = float4(0,0,0,0);
+    rec.fattr3 = float4(0,0,0,0);
+    //rec.iattr1 = int4(0,0,0,0);
+
+    hit_record_position(rec) = point3(0, 0, 0);
+    hit_record_t(rec) = 0;
+    hit_record_uv(rec) = float2(0, 0);
+    hit_record_normal(rec) = vec3(0, 0, 0);
+    hit_record_mat_set(rec, 0);
+    hit_record_front_face_set(rec, true);
+    //rec.position = point3(0, 0, 0);
+    //rec.normal = vec3(0, 1, 0);
+    //rec.mat = 0;
+    //rec.t = 0;
+    //rec.uv = float2(0,0);
+    //rec.front_face = true;
     return rec;
 }
 
@@ -284,8 +334,8 @@ void hit_record_set_face_normal(inout hit_record h, const ray r, const vec3 outw
     // Sets the hit record normal vector.
     // NOTE: the parameter `outward_normal` is assumed to have unit length.
 
-    h.front_face = dot(r.dir, outward_normal) < 0;
-    h.normal = h.front_face ? outward_normal : -outward_normal;
+    hit_record_front_face_set(h, dot(ray_dir(r), outward_normal) < 0);
+    hit_record_normal(h) = hit_record_front_face_get(h) ? outward_normal : -outward_normal;
 }
 
 

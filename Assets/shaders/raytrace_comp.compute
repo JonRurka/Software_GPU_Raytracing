@@ -1,16 +1,21 @@
 // Each #kernel tells which function to compile; you can have many kernels
-#pragma kernel CSMain
-
+//#pragma kernel CSMain
+#pragma kernel TransformPolygons
+#pragma kernel InitCamera
+#pragma kernel TraceIteration
+#pragma kernel Finalize
 
 
 int Width;
 int Height;
 int SamplesPerPixel;
+int SamplesPerRun;
 int MaxDepth;
 int Seed;
 int BVH_Depth;
 
 int NumObjects;
+int NumPoly;
 
 float VFOV;
 float3 LookFrom;
@@ -30,9 +35,12 @@ float FocusDist; // Variation angle of rays through each pixel
 RWTexture2D<float4> Result;
 StructuredBuffer<hit_object> Objects;
 RWStructuredBuffer<hit_poly> Polygons;
+RWStructuredBuffer<hit_poly> TransformedPolygons;
 StructuredBuffer<material> Materials;
 StructuredBuffer<bvh_node> BVH;
 RWStructuredBuffer<float4> debug;
+RWStructuredBuffer<pixel_orientation> PixelMeta;
+RWStructuredBuffer<int3> ColorAccume;
 
 bool material_scatter_none(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
 {
@@ -51,24 +59,24 @@ bool material_scatter_lambertian(inout rand_state state, const material mat, con
         return false;
 
     vec3 ran_vec = random_unit_vector(state);
-    vec3 scatter_direction = rec.normal + ran_vec;
+    vec3 scatter_direction = hit_record_normal(rec) + ran_vec;
 
     // Catch degenerate scatter direction
     if (vec3_near_zero(scatter_direction))
-        scatter_direction = rec.normal;
+        scatter_direction = hit_record_normal(rec);
 
-    scattered = ray_new(rec.position, scatter_direction, r_in.tm);
+    scattered = ray_new(hit_record_position(rec), scatter_direction, ray_tm(r_in));
     attenuation = mat.albedo;// sample_texture(rec.uv);// mat.albedo;
     return true;
 }
 
 bool material_scatter_metal(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
 {
-    vec3 reflected = vec3_reflect(r_in.dir, rec.normal);
+    vec3 reflected = vec3_reflect(ray_dir(r_in), hit_record_normal(rec));
     reflected = unit_vector(reflected) + (mat.fuzz * random_unit_vector(state));
-    scattered = ray_new(rec.position, reflected, r_in.tm);
+    scattered = ray_new(hit_record_position(rec), reflected, ray_tm(r_in));
     attenuation = mat.albedo;
-    return (dot(scattered.dir, rec.normal) > 0);
+    return (dot(ray_dir(scattered), hit_record_normal(rec)) > 0);
 }
 
 float material_dielectric_reflectance(float cosine, float refraction_index) {
@@ -81,21 +89,25 @@ float material_dielectric_reflectance(float cosine, float refraction_index) {
 bool material_scatter_dielectric(inout rand_state state, const material mat, const ray r_in, const hit_record rec, inout color attenuation, inout ray scattered)
 {
     attenuation = mat.albedo;
-    float ri = rec.front_face ? (1.0 / mat.refraction_index) : (mat.refraction_index);
+    float ri = hit_record_front_face_get(rec) ? (1.0 / mat.refraction_index) : (mat.refraction_index);
 
-    vec3 unit_direction = unit_vector(r_in.dir);
-    float cos_theta = min(dot(-unit_direction, rec.normal), 1.0);
+    vec3 rec_normal = hit_record_normal(rec);
+    vec3 rec_position = hit_record_position(rec);
+    vec3 direction;
+
+    vec3 unit_direction = unit_vector(ray_dir(r_in));
+    float cos_theta = min(dot(-unit_direction, rec_normal), 1.0);
     float sin_theta = sqrt(1.0 - cos_theta*cos_theta); 
 
     bool cannot_refract = ri * sin_theta > 1.0;
-    vec3 direction;
+    
 
     if (cannot_refract || material_dielectric_reflectance(cos_theta, ri) > random_double(state))
-        direction = vec3_reflect(unit_direction, rec.normal);
+        direction = vec3_reflect(unit_direction, rec_normal);
     else 
-        direction = vec3_refract(unit_direction, rec.normal, ri);
+        direction = vec3_refract(unit_direction, rec_normal, ri);
 
-    scattered = ray_new(rec.position, direction, r_in.tm);
+    scattered = ray_new(rec_position, direction, ray_tm(r_in));
     return true;
 }
 
@@ -150,18 +162,18 @@ material material_get(mat_ID id)
 bool hittable_hit_triangle(inout rand_state state, const hit_object obj, const hit_poly hit, const ray r, interval ray_t, inout hit_record rec)
 {
     // Möller-Trumbore method
-    vec3 pos = obj.center.orig;
-    float4x4 mat = obj.rotation;
+    //vec3 pos = obj.center.orig;
+    //float4x4 mat = obj.rotation;
 
     vec3 v0 = HIT_OBJECT_V0(hit);//(vec4(HIT_OBJECT_V0(hit), 1.0) * mat + pos).xyz;
     vec3 v1 = HIT_OBJECT_V1(hit);//(vec4(HIT_OBJECT_V1(hit), 1.0) * mat + pos).xyz;
     vec3 v2 = HIT_OBJECT_V2(hit);//(vec4(HIT_OBJECT_V2(hit), 1.0) * mat + pos).xyz;
-    vec3 orig = r.orig;
-    vec3 dir = r.dir;
+    vec3 orig = ray_orig(r);
+    vec3 dir = ray_dir(r);
 
-    v0 = mul(mat, vec4(v0, 1.0)).xyz + pos;
-    v1 = mul(mat, vec4(v1, 1.0)).xyz + pos;
-    v2 = mul(mat, vec4(v2, 1.0)).xyz + pos;
+    //v0 = mul(mat, vec4(v0, 1.0)).xyz + pos;
+    //v1 = mul(mat, vec4(v1, 1.0)).xyz + pos;
+    //v2 = mul(mat, vec4(v2, 1.0)).xyz + pos;
 
 
     vec3 v0v1 = v1 - v0;
@@ -173,7 +185,7 @@ bool hittable_hit_triangle(inout rand_state state, const hit_object obj, const h
 
     const bool culling = false;
 
-    rec.uv = float2(0, 0);
+    hit_record_uv(rec) = float2(0, 0);
 
     if (culling){
         // If the determinant is negative, the triangle is back-facing.
@@ -200,16 +212,17 @@ bool hittable_hit_triangle(inout rand_state state, const hit_object obj, const h
     if (!interval_surrounds(ray_t, t))
         return false;
 
-    rec.t = t;
-    rec.position = ray_at(r, rec.t);
-    rec.uv = float2(u, v);
+    hit_record_t(rec) = t;
+    hit_record_position(rec) = ray_at(r, t);
+    hit_record_uv(rec) = float2(u, v);
     vec3 outward_normal = normalize(cross(v0v1, v0v2));
     hit_record_set_face_normal(rec, r, outward_normal);
-    rec.mat = obj.mat;
+    hit_record_mat_set(rec, obj.mat);
 
     return true;
 }
 
+/*
 bool hittable_hit(inout rand_state state, const hit_object h, const ray r, interval ray_t, inout hit_record rec)
 {
     switch(h.hittable_type)
@@ -218,10 +231,10 @@ bool hittable_hit(inout rand_state state, const hit_object h, const ray r, inter
             return false;
             break;
         case HITTABLE_TYPE_SPHERE:
-            //return hittable_hit_sphere(state, h, r, ray_t, /*out*/ rec);
+            //return hittable_hit_sphere(state, h, r, ray_t, rec);
             break;
         case HITTABLE_TYPE_QUAD:
-            //return hittable_hit_quad(state, h, r, ray_t, /*out*/ rec);
+            //return hittable_hit_quad(state, h, r, ray_t, rec);
             break;
         default:
             return false;
@@ -351,8 +364,79 @@ bool hittable_bvh_hit(inout rand_state state, const ray r, interval ray_t, inout
 
 bool hittable_world_hit(inout rand_state state, const ray r, interval ray_t, inout hit_record rec)
 {
-    return hittable_list_hit(state, r, ray_t, /*out*/ rec);
+    return hittable_list_hit(state, r, ray_t, rec);
 }
+*/
+
+bool hittable_world_hit(inout rand_state state, const ray r, interval ray_t, inout hit_record rec)
+{
+    const int STACK_SIZE = 16;
+
+    int stack[STACK_SIZE];
+    int stack_offset = 0;
+    int max_stack = 0;
+    stack[stack_offset++] = 0; // root
+
+    bool res = false;
+    int hittable_idx = 0;
+
+    hit_record temp_rec = hit_record_new();
+    bool hit_anything = false;
+    float closest_so_far = ray_t.max;
+
+    int xit_reason = -1;
+    float3 tst_b;
+
+    int iter = 0;
+    while(true)
+    {
+        iter++;
+        if (stack_offset <= 0){
+            //xit_reason = 1;
+            break;
+        }
+
+        int idx = stack[--stack_offset];
+        bvh_node node = BVH[idx];
+
+        if (stack_offset >= STACK_SIZE || iter > 100){
+            //xit_reason = 2;
+            break;
+        }
+
+        if (!node.enabled || !aabb_hit(node.bounds, r, ray_t)){
+            tst_b = float3(node.bounds.x.max - node.bounds.x.min, node.bounds.y.max - node.bounds.y.min, node.bounds.z.max - node.bounds.z.min);
+            continue;
+        }
+
+        if (node.Leaf >= 0){
+            res = true;
+            hittable_idx = node.Leaf;
+
+            hit_poly poly = TransformedPolygons[hittable_idx];
+            hit_object h = Objects[poly.hit_obj_idx];
+
+            if (h.enabled == 1 && hittable_hit_triangle(state, h, poly, r, interval_new(ray_t.min, closest_so_far), temp_rec)){
+                hit_anything = true;
+                closest_so_far = hit_record_t(temp_rec);
+                rec = temp_rec;
+                //debug[C_2D_to_1D(state.id, Width)] = float4(1, 0, iter, 0);
+                //break;
+            }
+        }
+        else {
+            stack[stack_offset++] = node.right; //2 * idx + 2;
+            stack[stack_offset++] = node.left; //2 * idx + 1;
+        }
+
+        max_stack = max(stack_offset, max_stack);
+    }
+
+    //debug[C_2D_to_1D(state.id, Width)] = float4(1, max_stack, iter, 0);
+
+    return hit_anything;
+}
+
 
 color ray_color(inout rand_state state, ray r, int depth)
 {
@@ -402,8 +486,8 @@ color ray_color(inout rand_state state, ray r, int depth)
         {
             ray scattered = ray_new();
             color attenuation = color(0, 0, 0);
-            color col_from_emittion = material_emitted(material_get(rec.mat), rec.uv);
-            if (material_scatter(state, material_get(rec.mat), r, rec, attenuation,  scattered)){
+            color col_from_emittion = material_emitted(material_get( hit_record_mat_get(rec)), hit_record_uv(rec));
+            if (material_scatter(state, material_get(hit_record_mat_get(rec)), r, rec, attenuation,  scattered)){
                 color col_from_scatter = (cur_color * attenuation);
                 cur_color = col_from_scatter + col_from_emittion;
                 r = scattered;
@@ -414,7 +498,7 @@ color ray_color(inout rand_state state, ray r, int depth)
             }
         }
         else{
-            vec3 unit_direction = unit_vector(r.dir);
+            vec3 unit_direction = unit_vector(ray_dir(r));
             float a = 0.5 * (unit_direction.y + 1.0);
             color sky_col = (1.0 - a) * color(1.0, 1.0, 1.0) + a * color(0.5, 0.7, 1.0);
             cur_color *= background_color;//(sky_col);
@@ -442,13 +526,56 @@ void write_color(int3 id, color pixel_color){
     Result[id.xy] = float4(r, g, b, 1.0);
 }
 
+void update_color(int3 id, color pixel_color){
+    float r = pixel_color.x;
+    float g = pixel_color.y;
+    float b = pixel_color.z;
+
+    color cur_col = Result[id.xy].xyz;
+
+    interval intensity = interval_new(0.000, 0.999);
+    r = interval_clamp(intensity, cur_col.x + linear_to_gamma(r));
+    g = interval_clamp(intensity, cur_col.y + linear_to_gamma(g));
+    b = interval_clamp(intensity, cur_col.z + linear_to_gamma(b));
+
+    Result[id.xy] = float4(r, g, b, 1.0);
+}
+
+color do_trace(inout rand_state state, vec3 pixel00_loc, vec3 pixel_delta_u, vec3 pixel_delta_v, vec3 defocus_disk_u, vec3 defocus_disk_v)
+{
+    int i = state.id.x;
+    int j = state.id.y;
+
+    point3 center = LookFrom;
+
+    vec3 offset = sample_square(state);
+    vec3 pixel_sample = pixel00_loc +
+                        ((i + offset.x) * pixel_delta_u) +
+                        ((j + offset.y) * pixel_delta_v);
+
+    
+    // Returns a random point in the camera defocus disk.
+    vec3 p = random_in_unit_disk(state);
+    point3 def_sample = center + (p[0] * defocus_disk_u) + (p[1] * defocus_disk_v);
+    point3 ray_origin = (DefocusAngle <= 0.0001) ? center : def_sample;
+    float ray_time = random_double(state);
+
+    vec3 ray_direction = pixel_sample - ray_origin;
+
+    ray r = ray_new(ray_origin, ray_direction, ray_time);
+    return ray_color(state, r, MaxDepth);
+}
+
 [numthreads(64,1,1)]
 void TransformPolygons(uint3 id : SV_DispatchThreadID)
 {
+    if (id.x >= NumPoly)
+        return;
+
     hit_poly p = Polygons[id.x];
     hit_object obj = Objects[p.hit_obj_idx];
 
-    vec3 pos = obj.center.orig;
+    vec3 pos = ray_orig(obj.center);
     float4x4 mat = obj.rotation;
 
     vec3 v0 = HIT_OBJECT_V0(p);
@@ -459,12 +586,121 @@ void TransformPolygons(uint3 id : SV_DispatchThreadID)
     v1 = mul(mat, vec4(v1, 1.0)).xyz + pos;
     v2 = mul(mat, vec4(v2, 1.0)).xyz + pos;
 
+
     HIT_OBJECT_V0(p) = v0;
     HIT_OBJECT_V1(p) = v1;
     HIT_OBJECT_V2(p) = v2;
 
-    Polygons[id.x] = p;
+    p.attr1.w = id.x;
+
+    TransformedPolygons[id.x] = p;
 }
+
+[numthreads(1,1,1)]
+void BVHify(uint3 id : SV_DispatchThreadID)
+{
+    int cur = 0;
+
+    while(true)
+    {
+
+
+        //if ()
+    }
+}
+
+[numthreads(8,8,1)]
+void InitCamera (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= Width || id.y >= Height)
+        return;
+
+    float pixel_samples_scale = 1.0 / SamplesPerPixel;
+    point3 center = LookFrom;
+
+    // Determine viewport dimensions.
+
+    float theta = degrees_to_radians(VFOV);
+    float h = tan(theta / 2.0);
+    float viewport_height = 2.0f * h * FocusDist;
+    float viewport_wdith = viewport_height * (float(Width)/Height);
+
+    vec3 w = unit_vector(LookFrom - LookAt);
+    vec3 u = unit_vector(cross(VUP, w));
+    vec3 v = cross(w, u);
+
+
+    // Calculate the vectors across the horizontal and down the vertical viewport edges.
+
+    vec3 viewport_u = viewport_wdith * -u;
+    vec3 viewport_v = viewport_height * v;
+
+
+
+    // Calculate the horizontal and vertical delta vectors from pixel to pixel.
+
+    vec3 pixel_delta_u = viewport_u / Width;
+    vec3 pixel_delta_v = viewport_v / Height;
+
+
+    // Calculate the location of the upper left pixel.
+
+    vec3 viewport_upper_left = center - (FocusDist * w) - viewport_u/2 - viewport_v/2;
+    vec3 pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
+
+    float defocus_radius = FocusDist * tan(degrees_to_radians(DefocusAngle / 2));
+    vec3 defocus_disk_u = u * defocus_radius;
+    vec3 defocus_disk_v = v * defocus_radius;
+
+    pixel_orientation m;
+    m.pixel00_loc = float4(pixel00_loc, 0);
+    m.pixel_delta_u = float4(pixel_delta_u, 0);
+    m.pixel_delta_v = float4(pixel_delta_v, 0);
+    m.defocus_disk_u = float4(defocus_disk_u, 0);
+    m.defocus_disk_v = float4(defocus_disk_v, 0);
+    PixelMeta[C_2D_to_1D(id, Width)] = m;
+    ColorAccume[C_2D_to_1D(id, Width)] = int3(0, 0, 0);
+}
+
+[numthreads(8,8,10)]
+void TraceIteration(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= Width || id.y >= Height || id.z >= SamplesPerRun)
+        return;
+
+    rand_state state = rand_state_new(id);
+    pixel_orientation m = PixelMeta[C_2D_to_1D(state.id, Width)];
+    float pixel_samples_scale = 1.0 / SamplesPerPixel;
+    color pixel_color = do_trace(state, m.pixel00_loc.xyz, m.pixel_delta_u.xyz, m.pixel_delta_v.xyz, m.defocus_disk_u.xyz, m.defocus_disk_v.xyz);
+    
+    int idx = C_2D_to_1D(id, Width);
+
+    InterlockedAdd(ColorAccume[idx].x, int(pixel_color.x * 1000)); 
+    InterlockedAdd(ColorAccume[idx].y, int(pixel_color.y * 1000)); 
+    InterlockedAdd(ColorAccume[idx].z, int(pixel_color.z * 1000)); 
+
+    //update_color(id, pixel_color);
+}
+
+[numthreads(8,8,1)]
+void Finalize(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= Width || id.y >= Height)
+        return;
+
+    float pixel_samples_scale = 1.0 / SamplesPerPixel;
+    int idx = C_2D_to_1D(id, Width);
+    int3 intCol = ColorAccume[idx];
+    color col = color(
+        float(intCol.x) / 1000.0,
+        float(intCol.y) / 1000.0,
+        float(intCol.z) / 1000.0
+    );
+
+    write_color(id, col * pixel_samples_scale);
+}
+
+
 
 [numthreads(8,8,1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
@@ -517,25 +753,9 @@ void CSMain (uint3 id : SV_DispatchThreadID)
     color pixel_color = color(0, 0, 0);
     for (int sample = 0; sample < SamplesPerPixel; sample++)
     {
-        vec3 offset = sample_square(state);
-        vec3 pixel_sample = pixel00_loc +
-                            ((i + offset.x) * pixel_delta_u) +
-                            ((j + offset.y) * pixel_delta_v);
-
-        
-        // Returns a random point in the camera defocus disk.
-        vec3 p = random_in_unit_disk(state);
-        point3 def_sample = center + (p[0] * defocus_disk_u) + (p[1] * defocus_disk_v);
-        point3 ray_origin = (DefocusAngle <= 0.0001) ? center : def_sample;
-        float ray_time = random_double(state);
-
-        vec3 ray_direction = pixel_sample - ray_origin;
-    
-        ray r = ray_new(ray_origin, ray_direction, ray_time);
-        pixel_color += ray_color(state, r, MaxDepth);
+        pixel_color += do_trace(state, pixel00_loc, pixel_delta_u, pixel_delta_v, defocus_disk_u, defocus_disk_v) * pixel_samples_scale;
     }
 
-    write_color(id, pixel_color * pixel_samples_scale);
-
+    write_color(id, pixel_color);
 
 }

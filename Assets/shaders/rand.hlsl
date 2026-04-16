@@ -7,7 +7,11 @@ struct rand_state{
 };
 rand_state rand_state_new(int3 id){
     rand_state res;
-    res.cur_val = float3(max(1, uint(id.x + 1 + Seed) % uint(Width)), max(1, uint(id.y + 1 + Seed) % uint(Height)), 0);
+    res.cur_val = float3(
+        max(1, uint(id.x + 1 + Seed) % uint(Width)), 
+        max(1, uint(id.y + 1 + Seed) % uint(Height)), 
+        max(1, uint(id.z + 1 + Seed) % uint(SamplesPerRun))
+    );
     res.id = id;
     return res;
 }
@@ -15,9 +19,17 @@ rand_state rand_state_new(int3 id){
 //RWStructuredBuffer<float> rand_state;
 inline float random_double(inout rand_state state)
 {
-    float cur_val = frac(sin(dot(float2(state.cur_val.xy), float2(12.9898, 78.233))) * 43758.5453123);
-    state.cur_val += float3(max(1, state.id.x + 1 + cur_val), max(1, state.id.y + 1 + cur_val), 0);
-    state.cur_val = float3(fmod(state.cur_val.x, Width), fmod(state.cur_val.y, Height), 0);
+    float cur_val = frac(sin(dot(float3(state.cur_val), float3(12.9898, 78.233, 24.858))) * 43758.5453123);
+    state.cur_val += float3(
+        max(1, state.id.x + 1 + cur_val), 
+        max(1, state.id.y + 1 + cur_val), 
+        max(1, state.id.z + 1 + cur_val)
+    );
+    state.cur_val = float3(
+        fmod(state.cur_val.x, Width), 
+        fmod(state.cur_val.y, Height), 
+        fmod(state.cur_val.y, SamplesPerRun)
+    );
     return cur_val;
 }
 
